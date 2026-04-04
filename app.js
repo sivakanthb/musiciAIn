@@ -446,20 +446,22 @@
 
   /* ================================================================
      6. COMPOSITION AI ENGINE (Mood Composer)
+     Proper music theory: voice leading, motif development,
+     phrase structure, dynamics, tension/resolution
      ================================================================ */
   const MOOD_PROFILES = {
-    happy:      { scale:"major",     tempo:128, octave:4, energy:0.8,  swing:0,   voicing:"open",  arpStyle:"up",    drumPattern:"pop" },
-    sad:        { scale:"minor",     tempo:76,  octave:3, energy:0.3,  swing:0.1, voicing:"close",  arpStyle:"down",  drumPattern:"ballad" },
-    romantic:   { scale:"major",     tempo:88,  octave:4, energy:0.5,  swing:0.15,voicing:"spread", arpStyle:"updown",drumPattern:"ballad" },
-    energetic:  { scale:"pentatonic",tempo:145, octave:4, energy:1.0,  swing:0,   voicing:"power",  arpStyle:"random",drumPattern:"drive" },
-    calm:       { scale:"pentatonic",tempo:68,  octave:4, energy:0.2,  swing:0.1, voicing:"open",   arpStyle:"up",    drumPattern:"none" },
-    melancholy: { scale:"minor",     tempo:72,  octave:3, energy:0.25, swing:0.15,voicing:"close",  arpStyle:"down",  drumPattern:"ballad" },
-    triumphant: { scale:"major",     tempo:140, octave:4, energy:0.9,  swing:0,   voicing:"power",  arpStyle:"up",    drumPattern:"drive" },
-    mysterious: { scale:"phrygian",  tempo:84,  octave:3, energy:0.4,  swing:0.2, voicing:"close",  arpStyle:"random",drumPattern:"sparse" },
-    devotional: { scale:"pentatonic",tempo:70,  octave:3, energy:0.3,  swing:0.1, voicing:"open",   arpStyle:"up",    drumPattern:"none" },
-    playful:    { scale:"mixolydian",tempo:132, octave:4, energy:0.75, swing:0.2, voicing:"open",   arpStyle:"updown",drumPattern:"pop" },
-    epic:       { scale:"harmonicMinor",tempo:96,octave:3,energy:0.85, swing:0,   voicing:"power",  arpStyle:"up",    drumPattern:"epic" },
-    nostalgia:  { scale:"pentatonic",tempo:86,  octave:4, energy:0.4,  swing:0.15,voicing:"spread", arpStyle:"down",  drumPattern:"ballad" },
+    happy:      { scale:"major",     tempo:128, octave:4, energy:0.8,  swing:0,   voicing:"open",  arpStyle:"up",    drumPattern:"pop",    instrument:"piano" },
+    sad:        { scale:"minor",     tempo:76,  octave:3, energy:0.3,  swing:0.1, voicing:"close",  arpStyle:"down",  drumPattern:"ballad", instrument:"pad" },
+    romantic:   { scale:"major",     tempo:88,  octave:4, energy:0.5,  swing:0.15,voicing:"spread", arpStyle:"updown",drumPattern:"ballad", instrument:"strings" },
+    energetic:  { scale:"pentatonic",tempo:145, octave:4, energy:1.0,  swing:0,   voicing:"power",  arpStyle:"random",drumPattern:"drive",  instrument:"synth" },
+    calm:       { scale:"pentatonic",tempo:68,  octave:4, energy:0.2,  swing:0.1, voicing:"open",   arpStyle:"up",    drumPattern:"none",   instrument:"pad" },
+    melancholy: { scale:"minor",     tempo:72,  octave:3, energy:0.25, swing:0.15,voicing:"close",  arpStyle:"down",  drumPattern:"ballad", instrument:"strings" },
+    triumphant: { scale:"major",     tempo:140, octave:4, energy:0.9,  swing:0,   voicing:"power",  arpStyle:"up",    drumPattern:"drive",  instrument:"piano" },
+    mysterious: { scale:"phrygian",  tempo:84,  octave:3, energy:0.4,  swing:0.2, voicing:"close",  arpStyle:"random",drumPattern:"sparse", instrument:"pad" },
+    devotional: { scale:"pentatonic",tempo:70,  octave:3, energy:0.3,  swing:0.1, voicing:"open",   arpStyle:"up",    drumPattern:"none",   instrument:"flute" },
+    playful:    { scale:"mixolydian",tempo:132, octave:4, energy:0.75, swing:0.2, voicing:"open",   arpStyle:"updown",drumPattern:"pop",    instrument:"piano" },
+    epic:       { scale:"harmonicMinor",tempo:96,octave:3,energy:0.85, swing:0,   voicing:"power",  arpStyle:"up",    drumPattern:"epic",   instrument:"strings" },
+    nostalgia:  { scale:"pentatonic",tempo:86,  octave:4, energy:0.4,  swing:0.15,voicing:"spread", arpStyle:"down",  drumPattern:"ballad", instrument:"piano" },
   };
 
   // Drum patterns for composition
@@ -478,6 +480,184 @@
   let compositionDuration = 0;
   let compositionNotes = []; // for piano roll
 
+  /* ---------- Voice Leading Engine ----------
+     Move each chord voice to the nearest available note
+     in the next chord for smooth, musical transitions */
+  function voiceLead(prevVoicing, nextChordRoot, nextQuality, octave) {
+    const nextIntervals = CHORD_TYPES[nextQuality];
+    const targetPitches = nextIntervals.map(n => nextChordRoot + n);
+    // If no previous voicing, create initial spread voicing
+    if (!prevVoicing || prevVoicing.length === 0) {
+      const baseMidi = (octave + 1) * 12 + nextChordRoot;
+      return targetPitches.map((p, i) => {
+        let midi = baseMidi + (p - nextChordRoot);
+        if (i > 0 && midi <= baseMidi) midi += 12;
+        return midi;
+      });
+    }
+    // For each voice, find the nearest target pitch class
+    const voicing = [];
+    const usedTargets = new Set();
+    prevVoicing.forEach((prevMidi, vi) => {
+      let bestMidi = prevMidi;
+      let bestDist = 999;
+      targetPitches.forEach((tp, ti) => {
+        if (usedTargets.has(ti)) return;
+        // Find nearest octave of this pitch class
+        for (let oct = -1; oct <= 1; oct++) {
+          const candidate = (Math.floor(prevMidi / 12)) * 12 + tp + oct * 12;
+          const dist = Math.abs(candidate - prevMidi);
+          if (dist < bestDist) {
+            bestDist = dist;
+            bestMidi = candidate;
+          }
+        }
+      });
+      voicing.push(bestMidi);
+    });
+    // If we have more target notes than voices, add them
+    while (voicing.length < targetPitches.length) {
+      const baseMidi = (octave + 1) * 12 + nextChordRoot;
+      voicing.push(baseMidi + targetPitches[voicing.length]);
+    }
+    return voicing;
+  }
+
+  /* ---------- Motif Generator ----------
+     Creates a short melodic idea (3-5 notes) with specific
+     rhythm and contour, then develops it through the piece */
+  function generateMotif(scaleArr, energy) {
+    const motifLen = energy > 0.6 ? 5 : energy > 0.3 ? 4 : 3;
+    const degrees = []; // scale degree indices
+    const rhythms = []; // duration multipliers
+    let deg = Math.floor(scaleArr.length / 2); // start mid-range
+
+    // Contour: arch shape (rise then fall) — most natural
+    for (let i = 0; i < motifLen; i++) {
+      degrees.push(deg);
+      const progress = i / (motifLen - 1);
+      if (progress < 0.5) {
+        // Rising phase
+        deg += Math.random() > 0.3 ? 1 : 2;
+      } else {
+        // Falling phase
+        deg -= Math.random() > 0.3 ? 1 : 2;
+      }
+      deg = Math.max(0, Math.min(scaleArr.length * 2 - 1, deg));
+
+      // Rhythmic variety: mix of long and short
+      if (i === 0) rhythms.push(1.5);       // Start with a longer note
+      else if (i === motifLen - 1) rhythms.push(2.0); // End with longest
+      else rhythms.push(Math.random() > 0.5 ? 0.75 : 1.0); // Mix
+    }
+    return { degrees, rhythms };
+  }
+
+  /* Develop a motif: transpose, invert, fragment, augment */
+  function developMotif(motif, technique, transpose) {
+    const { degrees, rhythms } = motif;
+    const shift = transpose || 0;
+    switch (technique) {
+      case "transpose":
+        return { degrees: degrees.map(d => d + shift), rhythms: [...rhythms] };
+      case "invert": {
+        const pivot = degrees[0];
+        return { degrees: degrees.map(d => pivot - (d - pivot) + shift), rhythms: [...rhythms] };
+      }
+      case "fragment":
+        // Use first half of motif
+        const half = Math.ceil(degrees.length / 2);
+        return { degrees: degrees.slice(0, half).map(d => d + shift), rhythms: rhythms.slice(0, half) };
+      case "augment":
+        return { degrees: degrees.map(d => d + shift), rhythms: rhythms.map(r => r * 1.5) };
+      case "sequence":
+        // Repeat motif shifted up by step
+        return { degrees: degrees.map(d => d + shift + 2), rhythms: [...rhythms] };
+      default:
+        return { degrees: degrees.map(d => d + shift), rhythms: [...rhythms] };
+    }
+  }
+
+  /* ---------- Rhythm Pattern Library ----------
+     Real musical rhythms, not grid-quantized */
+  const RHYTHM_PATTERNS = {
+    // Each pattern = array of [beatOffset, durationMultiplier]
+    steady4:   [[0, 1], [1, 1], [2, 1], [3, 1]],
+    dotted:    [[0, 1.5], [1.5, 0.5], [2, 1.5], [3.5, 0.5]],
+    syncopated:[[0, 1], [1, 0.5], [1.5, 1], [2.5, 0.5], [3, 1]],
+    sparse:    [[0, 2], [2.5, 1.5]],
+    flowing:   [[0, 0.75], [0.75, 0.75], [1.5, 1], [2.5, 0.75], [3.25, 0.75]],
+    triplet:   [[0, 0.67], [0.67, 0.67], [1.33, 0.67], [2, 0.67], [2.67, 0.67], [3.33, 0.67]],
+    waltz:     [[0, 1.5], [1.5, 0.75], [2.25, 0.75], [3, 1]],
+    driving:   [[0, 0.5], [0.5, 0.5], [1, 0.5], [1.5, 0.5], [2, 0.5], [2.5, 0.5], [3, 0.5], [3.5, 0.5]],
+  };
+
+  /* Pick rhythm pattern based on energy & section */
+  function pickRhythmPattern(energy, sectionName) {
+    if (sectionName === "intro" || sectionName === "outro") return RHYTHM_PATTERNS.sparse;
+    if (sectionName === "bridge") return RHYTHM_PATTERNS.waltz;
+    if (energy > 0.8) return Math.random() > 0.5 ? RHYTHM_PATTERNS.driving : RHYTHM_PATTERNS.syncopated;
+    if (energy > 0.5) return Math.random() > 0.5 ? RHYTHM_PATTERNS.flowing : RHYTHM_PATTERNS.dotted;
+    return Math.random() > 0.5 ? RHYTHM_PATTERNS.steady4 : RHYTHM_PATTERNS.sparse;
+  }
+
+  /* ---------- Bass Pattern Library ---------- */
+  function generateBassLine(chordRoot, chordQuality, beatDur, barStart, energy, sectionName, scaleArr, keyRoot, vols, intensity) {
+    const bassMidi = noteToMidi(NOTES[chordRoot], 2);
+    const fifth = bassMidi + 7;
+    const octave = bassMidi + 12;
+    const notes = [];
+
+    if (sectionName === "intro") {
+      // Intro: just whole notes on root
+      synthNote(midiToFreq(bassMidi), beatDur * 3.5, "bass", barStart, vols * intensity * 0.6);
+      notes.push({ midi: bassMidi, time: barStart - compositionStartTime, dur: beatDur * 3.5, layer: "bass" });
+      return notes;
+    }
+
+    if (sectionName === "outro") {
+      // Outro: root held, fading
+      synthNote(midiToFreq(bassMidi), beatDur * 3, "bass", barStart, vols * intensity * 0.4);
+      notes.push({ midi: bassMidi, time: barStart - compositionStartTime, dur: beatDur * 3, layer: "bass" });
+      return notes;
+    }
+
+    if (energy > 0.7) {
+      // Walking bass: root - passing - fifth - chromatic approach to next root
+      const scaleDeg = scaleArr || [0, 2, 4, 5, 7];
+      const passingNote = bassMidi + (scaleDeg[2] || 4); // third
+      const approach = bassMidi - 1; // chromatic approach from below (to next chord)
+      const pattern = [
+        [0, bassMidi, 0.9],
+        [1, passingNote, 0.7],
+        [2, fifth, 0.85],
+        [3, approach, 0.6],
+      ];
+      pattern.forEach(([beat, midi, vol]) => {
+        const t = barStart + beat * beatDur;
+        synthNote(midiToFreq(midi), beatDur * 0.75, "bass", t, vols * intensity * vol);
+        notes.push({ midi, time: t - compositionStartTime, dur: beatDur * 0.75, layer: "bass" });
+      });
+    } else if (energy > 0.4) {
+      // Root-fifth pattern
+      const pattern = [
+        [0, bassMidi, 1.8, 0.9],
+        [2, fifth, 1.5, 0.7],
+      ];
+      pattern.forEach(([beat, midi, dur, vol]) => {
+        const t = barStart + beat * beatDur;
+        synthNote(midiToFreq(midi), beatDur * dur, "bass", t, vols * intensity * vol);
+        notes.push({ midi, time: t - compositionStartTime, dur: beatDur * dur, layer: "bass" });
+      });
+    } else {
+      // Sustained root
+      synthNote(midiToFreq(bassMidi), beatDur * 3.5, "bass", barStart, vols * intensity * 0.7);
+      notes.push({ midi: bassMidi, time: barStart - compositionStartTime, dur: beatDur * 3.5, layer: "bass" });
+    }
+    return notes;
+  }
+
+  /* ---------- Main Composition Generator ---------- */
   function generateComposition(mood, key, scaleChoice, tempo, bars) {
     const profile = MOOD_PROFILES[mood] || MOOD_PROFILES.happy;
     const scale = scaleChoice === "auto" ? profile.scale : scaleChoice;
@@ -486,6 +666,7 @@
     const barDur = beatDur * 4;
     const totalBars = bars || 16;
     const totalTime = totalBars * barDur;
+    const scaleArr = SCALES[scale] || SCALES.major;
 
     // Get chord progression
     const progs = PROGRESSIONS[mood] || PROGRESSIONS.happy;
@@ -523,121 +704,235 @@
     compositionStartTime = startTime;
     compositionDuration = totalTime;
 
+    // === PRE-GENERATE: Create a motif seed for the whole piece ===
+    const mainMotif = generateMotif(scaleArr, profile.energy);
+    // Define how motif develops across sections
+    const motifPlan = {
+      intro:  { technique: "fragment", transpose: 0 },
+      verse:  { technique: "transpose", transpose: 0 },
+      chorus: { technique: "transpose", transpose: 2 },  // Higher energy
+      bridge: { technique: "invert", transpose: 1 },    // Contrast
+      outro:  { technique: "augment", transpose: -2 },   // Slower, lower
+    };
+
+    let prevVoicing = null; // Track chord voicing for voice leading
+
     // Generate each section
-    sections.forEach(section => {
+    sections.forEach((section, sectionIdx) => {
       const sectionStart = startTime + section.startBar * barDur;
       const isIntro = section.name === "intro";
       const isOutro = section.name === "outro";
       const isChorus = section.name === "chorus";
       const isBridge = section.name === "bridge";
 
-      // Intensity multiplier
-      const intensity = isIntro ? 0.5 : isOutro ? 0.4 : isChorus ? 1.2 : isBridge ? 0.7 : 1.0;
+      // Dynamic intensity: ramp within each section
+      const baseIntensity = isIntro ? 0.45 : isOutro ? 0.35 : isChorus ? 1.15 : isBridge ? 0.65 : 0.9;
+      const melInstrument = isChorus ? profile.instrument : isBridge ? "pad" : isIntro ? "pad" : profile.instrument;
+
+      // Get motif variation for this section
+      const plan = motifPlan[section.name] || motifPlan.verse;
+      const sectionMotif = developMotif(mainMotif, plan.technique, plan.transpose);
 
       for (let bar = 0; bar < section.bars; bar++) {
         const barStart = sectionStart + bar * barDur;
+        const barInSection = bar / Math.max(1, section.bars - 1);
         const chordIdx = prog[bar % prog.length] - 1;
         const chord = chords[chordIdx % chords.length];
         const rootMidi = noteToMidi(NOTES[chord.root], profile.octave);
 
-        // === CHORDS ===
-        if (layers.chords && !isIntro) {
-          const chordMidis = CHORD_TYPES[chord.quality].map(n => rootMidi + n);
-          chordMidis.forEach(midi => {
-            synthNote(midiToFreq(midi), barDur * 0.95, "pad", barStart, vols.chords * intensity, true);
-            compositionNotes.push({ midi, time: barStart - startTime, dur: barDur * 0.95, layer: "chord" });
-          });
-        }
+        // Dynamic shaping: crescendo in verses, peak in chorus
+        let dynamicMult;
+        if (isIntro) dynamicMult = 0.3 + barInSection * 0.4;        // Build up
+        else if (isOutro) dynamicMult = 0.6 - barInSection * 0.4;    // Fade down
+        else if (isChorus) dynamicMult = 0.95 + Math.sin(barInSection * Math.PI) * 0.2; // Peak in middle
+        else dynamicMult = 0.7 + barInSection * 0.25;                // Gradual build
+        const intensity = baseIntensity * dynamicMult;
 
-        // === BASS ===
-        if (layers.bass) {
-          const bassMidi = noteToMidi(NOTES[chord.root], 2);
-          // Bass pattern: root on 1 and 3
-          [0, 2].forEach(beat => {
-            if (isIntro && beat > 0) return;
-            const t = barStart + beat * beatDur;
-            synthNote(midiToFreq(bassMidi), beatDur * 0.8, "bass", t, vols.bass * intensity * (isOutro ? 0.5 : 1));
-            compositionNotes.push({ midi: bassMidi, time: t - startTime, dur: beatDur * 0.8, layer: "bass" });
-          });
-          // Walking bass on high energy
-          if (profile.energy > 0.6 && !isIntro && !isOutro) {
-            [1, 3].forEach(beat => {
-              const walkNote = bassMidi + [0, 2, 4, 5, 7][Math.floor(Math.random() * 5)];
-              const t = barStart + beat * beatDur;
-              synthNote(midiToFreq(walkNote), beatDur * 0.6, "bass", t, vols.bass * 0.6);
-              compositionNotes.push({ midi: walkNote, time: t - startTime, dur: beatDur * 0.6, layer: "bass" });
+        // === CHORDS with voice leading ===
+        if (layers.chords) {
+          prevVoicing = voiceLead(prevVoicing, chord.root, chord.quality, profile.octave);
+          const chordDur = isIntro ? barDur * 0.9 : isBridge ? barDur * 0.5 : barDur * 0.85;
+          const chordVol = vols.chords * intensity * (isIntro ? 0.5 : 1);
+
+          // For bridge: play 2 chords per bar (faster harmonic rhythm)
+          if (isBridge && bar % 2 === 0) {
+            // First half
+            prevVoicing.forEach(midi => {
+              synthNote(midiToFreq(midi), barDur * 0.45, "pad", barStart, chordVol * 0.85, true);
+              compositionNotes.push({ midi, time: barStart - startTime, dur: barDur * 0.45, layer: "chord" });
+            });
+            // Second half with next chord
+            const nextChordIdx = prog[(bar + 1) % prog.length] - 1;
+            const nextChord = chords[nextChordIdx % chords.length];
+            prevVoicing = voiceLead(prevVoicing, nextChord.root, nextChord.quality, profile.octave);
+            prevVoicing.forEach(midi => {
+              const t = barStart + barDur * 0.5;
+              synthNote(midiToFreq(midi), barDur * 0.45, "pad", t, chordVol * 0.75, true);
+              compositionNotes.push({ midi, time: t - startTime, dur: barDur * 0.45, layer: "chord" });
+            });
+          } else {
+            prevVoicing.forEach(midi => {
+              synthNote(midiToFreq(midi), chordDur, "pad", barStart, chordVol, true);
+              compositionNotes.push({ midi, time: barStart - startTime, dur: chordDur, layer: "chord" });
             });
           }
         }
 
-        // === MELODY ===
-        if (layers.melody && !isIntro) {
-          const melodyScale = SCALES[scale] || SCALES.major;
+        // === BASS with musical patterns ===
+        if (layers.bass) {
+          const bassNotes = generateBassLine(
+            chord.root, chord.quality, beatDur, barStart,
+            profile.energy * intensity, section.name, scaleArr,
+            NOTES.indexOf(key), vols.bass, intensity
+          );
+          compositionNotes.push(...bassNotes);
+        }
+
+        // === MELODY with motif development ===
+        if (layers.melody && !(isIntro && bar < 1)) {
           const melOctave = profile.octave + 1;
-          const notesPerBar = profile.energy > 0.6 ? 6 : profile.energy > 0.3 ? 4 : 3;
+          const motifNotes = sectionMotif.degrees;
+          const motifRhythms = sectionMotif.rhythms;
+          const baseRhythm = pickRhythmPattern(profile.energy * intensity, section.name);
 
-          // Create a motif in first bar, then develop it
-          let prevDeg = Math.floor(melodyScale.length / 2);
-          for (let n = 0; n < notesPerBar; n++) {
-            const beatPos = (n / notesPerBar) * 4;
-            const noteDur = beatDur * (4 / notesPerBar) * (0.6 + Math.random() * 0.3);
+          // Use motif for phrase beginnings (bars 0 & 2), free melodic movement for bars 1 & 3
+          const isMotifBar = (bar % 4 === 0 || bar % 4 === 2);
+          const isAnswerBar = (bar % 4 === 1 || bar % 4 === 3);
 
-            // Melodic movement
-            let step;
-            if (isChorus) {
-              step = Math.random() > 0.3 ? (Math.random() > 0.5 ? 1 : -1) : (Math.random() > 0.5 ? 2 : -2);
-            } else if (isBridge) {
-              step = Math.floor(Math.random() * 5) - 2;
-            } else {
-              step = Math.random() > 0.4 ? (Math.random() > 0.5 ? 1 : -1) : 0;
+          if (isMotifBar) {
+            // Play the motif (or a development of it)
+            let t = 0;
+            motifNotes.forEach((deg, i) => {
+              if (i >= motifRhythms.length) return;
+              const safeDeg = Math.max(0, Math.min(scaleArr.length * 2 - 1, deg));
+              const octOffset = Math.floor(safeDeg / scaleArr.length);
+              const degInScale = safeDeg % scaleArr.length;
+              const melMidi = noteToMidi(key, melOctave + octOffset) + scaleArr[degInScale];
+              const noteDur = beatDur * motifRhythms[i] * 0.85;
+              const noteTime = barStart + t * beatDur;
+
+              // Strong beat = louder, weak beat = softer (accent pattern)
+              const accent = (t < 0.1 || (t > 1.9 && t < 2.1)) ? 1.0 : 0.75;
+              const melVol = vols.melody * intensity * accent * (isOutro ? Math.max(0.1, 1 - barInSection) : 1);
+
+              if (melVol > 0.01) {
+                synthNote(midiToFreq(melMidi), noteDur, melInstrument, noteTime, melVol, true);
+                compositionNotes.push({ midi: melMidi, time: noteTime - startTime, dur: noteDur, layer: "melody" });
+              }
+              t += motifRhythms[i];
+            });
+          } else if (isAnswerBar) {
+            // "Answer" phrase: respond to the motif with complementary movement
+            // Use chord tones on strong beats, passing tones on weak beats
+            const chordTones = CHORD_TYPES[chord.quality].map(n => chord.root + n);
+            const rhythm = baseRhythm;
+            let prevDeg = motifNotes[motifNotes.length - 1] || Math.floor(scaleArr.length / 2);
+
+            rhythm.forEach(([beatOffset, durMult], i) => {
+              // On strong beats (0, 2): use chord tones for consonance
+              const isStrongBeat = beatOffset < 0.1 || (beatOffset > 1.9 && beatOffset < 2.1);
+              let targetDeg;
+
+              if (isStrongBeat) {
+                // Land on a chord tone
+                const chordDegrees = chordTones.map(ct => {
+                  for (let d = 0; d < scaleArr.length; d++) {
+                    if (scaleArr[d] % 12 === ct % 12) return d;
+                  }
+                  return Math.floor(scaleArr.length / 2);
+                });
+                targetDeg = chordDegrees[Math.floor(Math.random() * chordDegrees.length)];
+              } else {
+                // Step motion (passing tones)
+                const step = Math.random() > 0.5 ? 1 : -1;
+                targetDeg = prevDeg + step;
+              }
+
+              targetDeg = Math.max(0, Math.min(scaleArr.length * 2 - 1, targetDeg));
+              const octOffset = Math.floor(targetDeg / scaleArr.length);
+              const degInScale = targetDeg % scaleArr.length;
+              const melMidi = noteToMidi(key, melOctave + octOffset) + scaleArr[degInScale];
+              const noteDur = beatDur * durMult * 0.8;
+              const noteTime = barStart + beatOffset * beatDur;
+
+              // Rest probability: leave breathing room
+              if (Math.random() > profile.energy + 0.3) return;
+
+              const accent = isStrongBeat ? 1.0 : 0.7;
+              const melVol = vols.melody * intensity * accent * 0.85;
+
+              if (melVol > 0.01) {
+                synthNote(midiToFreq(melMidi), noteDur, melInstrument, noteTime, melVol, true);
+                compositionNotes.push({ midi: melMidi, time: noteTime - startTime, dur: noteDur, layer: "melody" });
+              }
+              prevDeg = targetDeg;
+            });
+
+            // End of 4-bar phrase: resolve to tonic on last bar
+            if (bar % 4 === 3) {
+              const tonicMidi = noteToMidi(key, melOctave);
+              const resolveTime = barStart + 3.5 * beatDur;
+              synthNote(midiToFreq(tonicMidi), beatDur * 1.2, melInstrument, resolveTime, vols.melody * intensity * 0.6, true);
+              compositionNotes.push({ midi: tonicMidi, time: resolveTime - startTime, dur: beatDur * 1.2, layer: "melody" });
             }
-
-            prevDeg = Math.max(0, Math.min(melodyScale.length * 2 - 1, prevDeg + step));
-            const octOffset = Math.floor(prevDeg / melodyScale.length);
-            const degInScale = prevDeg % melodyScale.length;
-            const melMidi = noteToMidi(key, melOctave + octOffset) + melodyScale[degInScale];
-
-            // Rest probability
-            if (Math.random() > profile.energy + 0.4) continue;
-            if (isOutro && n > notesPerBar / 2) continue;
-
-            const t = barStart + beatPos * beatDur;
-            synthNote(midiToFreq(melMidi), noteDur, "piano", t, vols.melody * intensity * 0.8, true);
-            compositionNotes.push({ midi: melMidi, time: t - startTime, dur: noteDur, layer: "melody" });
           }
         }
 
-        // === ARPEGGIO ===
-        if (layers.arp && isChorus) {
-          const arpMidis = CHORD_TYPES[chord.quality].map(n => rootMidi + 12 + n);
+        // === ARPEGGIO with musical patterns ===
+        if (layers.arp && (isChorus || (isBridge && profile.energy > 0.5))) {
+          const arpOctave = profile.octave + 1;
+          const arpRoot = noteToMidi(NOTES[chord.root], arpOctave);
+          const arpMidis = CHORD_TYPES[chord.quality].map(n => arpRoot + n);
+          // Add octave note for fuller arpeggios
+          arpMidis.push(arpMidis[0] + 12);
+
           const arpPatterns = {
-            up: [0,1,2,0,1,2,0,1],
-            down: [2,1,0,2,1,0,2,1],
-            updown: [0,1,2,1,0,1,2,1],
-            random: Array.from({length:8}, () => Math.floor(Math.random() * 3)),
+            up:     [0,1,2,3,2,1,0,1],     // sweep up and back
+            down:   [3,2,1,0,1,2,3,2],     // sweep down and back
+            updown: [0,1,2,3,3,2,1,0],     // full arc
+            random: Array.from({length:8}, (_, i) => {
+              // Not truly random — alternate between low and high for musicality
+              return i % 2 === 0 ? Math.floor(Math.random() * 2) : 2 + Math.floor(Math.random() * 2);
+            }),
           };
           const pattern = arpPatterns[profile.arpStyle] || arpPatterns.up;
-          const arpBeatDiv = beatDur / 2;
+
+          // Vary arp speed: 8th notes for chorus, dotted for bridge
+          const arpDiv = isBridge ? beatDur * 0.75 : beatDur / 2;
+          const arpVol = vols.arp * intensity;
+
           pattern.forEach((idx, i) => {
-            if (i >= 8) return;
-            const t = barStart + i * arpBeatDiv;
+            if (i * arpDiv >= barDur) return;
+            const t = barStart + i * arpDiv;
             const midi = arpMidis[idx % arpMidis.length];
-            synthNote(midiToFreq(midi), arpBeatDiv * 0.7, "arp", t, vols.arp * intensity);
-            compositionNotes.push({ midi, time: t - startTime, dur: arpBeatDiv * 0.7, layer: "arp" });
+            // Accent first note of each beat
+            const accent = (i % 2 === 0) ? 1.0 : 0.65;
+            synthNote(midiToFreq(midi), arpDiv * 0.65, "arp", t, arpVol * accent);
+            compositionNotes.push({ midi, time: t - startTime, dur: arpDiv * 0.65, layer: "arp" });
           });
         }
 
-        // === DRUMS ===
+        // === DRUMS with dynamic variation ===
         if (layers.drums && !isIntro) {
           const dp = COMP_DRUMS[profile.drumPattern] || {};
           Object.keys(dp).forEach(drum => {
             dp[drum].forEach((hit, step) => {
               if (!hit) return;
               if (isOutro && step > 8) return;
+              // Ghost notes: occasional softer hits on off-beats for groove
+              const isDownbeat = step % 4 === 0;
+              const ghostVel = isDownbeat ? 1.0 : (step % 2 === 0 ? 0.8 : 0.6);
               const t = barStart + step * (beatDur / 4);
-              synthDrum(drum, t, vols.drums * intensity);
+              synthDrum(drum, t, vols.drums * intensity * ghostVel);
             });
           });
+          // Fill at end of 4-bar phrase in chorus
+          if (isChorus && bar % 4 === 3) {
+            const fillTimes = [12, 13, 14, 15].map(s => barStart + s * (beatDur / 4));
+            fillTimes.forEach((t, i) => {
+              synthDrum(i < 2 ? "tom" : "snare", t, vols.drums * intensity * 0.7);
+            });
+          }
         }
       }
     });
