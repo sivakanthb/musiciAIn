@@ -32,7 +32,7 @@
   --radius-xs: 5px;
   --shadow: 0 2px 16px rgba(0,0,0,0.4);
   --shadow-lg: 0 8px 40px rgba(0,0,0,0.6);
-  --ease: 0.2s ease;
+  --ease: 0.35s cubic-bezier(0.4, 0, 0.2, 1);
   --ease-spring: 0.3s cubic-bezier(0.34,1.56,0.64,1);
 }
 
@@ -40,12 +40,43 @@ html{scroll-behavior:smooth}
 body{font-family:var(--font);background:var(--bg);color:var(--text);line-height:1.6;-webkit-font-smoothing:antialiased;overflow-x:hidden}
 .container{max-width:1120px;margin:0 auto;padding:0 24px;width:100%}
 
+/* ======================== AMBIENT CANVAS ======================== */
+.ambient-canvas{position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:0;opacity:0.6}
+
+/* ======================== FOCUS-VISIBLE (a11y) ======================== */
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:var(--radius-xs)}
+button:focus:not(:focus-visible),a:focus:not(:focus-visible){outline:none}
+
+/* ======================== ENTRANCE ANIMATIONS ======================== */
+@keyframes fadeInUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+.mood-card{animation:fadeInUp 0.5s var(--ease) both}
+.mood-card:nth-child(1){animation-delay:0.03s}
+.mood-card:nth-child(2){animation-delay:0.06s}
+.mood-card:nth-child(3){animation-delay:0.09s}
+.mood-card:nth-child(4){animation-delay:0.12s}
+.mood-card:nth-child(5){animation-delay:0.15s}
+.mood-card:nth-child(6){animation-delay:0.18s}
+.mood-card:nth-child(7){animation-delay:0.21s}
+.mood-card:nth-child(8){animation-delay:0.24s}
+.mood-card:nth-child(9){animation-delay:0.27s}
+.mood-card:nth-child(10){animation-delay:0.30s}
+.mood-card:nth-child(11){animation-delay:0.33s}
+.mood-card:nth-child(12){animation-delay:0.36s}
+.raga-card{animation:fadeInUp 0.4s var(--ease) both}
+.control-panel,.sequencer,.keyboard-container,.viz-area,.raga-detail-card{animation:fadeIn 0.4s var(--ease) both}
+.hero-title{animation:fadeInUp 0.6s var(--ease) both;animation-delay:0.1s}
+.hero-sub{animation:fadeInUp 0.6s var(--ease) both;animation-delay:0.2s}
+.hero-desc{animation:fadeInUp 0.6s var(--ease) both;animation-delay:0.3s}
+.hero-stats{animation:fadeInUp 0.6s var(--ease) both;animation-delay:0.4s}
+
 /* ======================== NAV ======================== */
 .nav{
   position:sticky;top:0;z-index:100;
-  background:rgba(9,9,13,0.95);
-  backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);
+  background:rgba(9,9,13,0.88);
+  backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);
   border-bottom:1px solid var(--border);
+  transition:background var(--ease);
 }
 .nav-inner{display:flex;align-items:center;justify-content:space-between;height:60px;padding:0 24px}
 .nav-brand{display:flex;align-items:center;gap:8px;font-weight:900;font-size:1.2rem;color:var(--text);text-decoration:none;letter-spacing:-0.02em}
@@ -144,12 +175,12 @@ select{cursor:pointer}
 }
 .btn:disabled{opacity:0.35;cursor:not-allowed;pointer-events:none}
 .btn-primary{background:var(--accent);color:#fff;border-color:var(--accent)}
-.btn-primary:hover:not(:disabled){background:#7c3aed;box-shadow:0 4px 24px var(--accent-glow);transform:translateY(-1px)}
+.btn-primary:hover:not(:disabled){background:#7c3aed;box-shadow:0 4px 24px var(--accent-glow);transform:translateY(-2px)}
 .btn-lg{padding:13px 28px;font-size:0.88rem;font-weight:700}
 .btn-secondary{background:var(--surface2);color:var(--text2);border-color:var(--border)}
 .btn-secondary:hover:not(:disabled){background:var(--surface3);color:var(--text);border-color:var(--border2)}
 .btn-accent{background:linear-gradient(135deg,var(--accent),var(--pink));color:#fff;border:none}
-.btn-accent:hover:not(:disabled){opacity:0.9;transform:translateY(-1px);box-shadow:0 4px 20px rgba(236,72,153,0.2)}
+.btn-accent:hover:not(:disabled){opacity:0.9;transform:translateY(-2px);box-shadow:0 6px 24px rgba(236,72,153,0.25)}
 .btn-outline{background:transparent;color:var(--text2);border-color:var(--border)}
 .btn-outline:hover:not(:disabled){color:var(--text);border-color:var(--border2);background:var(--surface)}
 .btn-tanpura{background:var(--surface);border:1px solid var(--border);color:var(--text2);font-size:0.82rem;font-weight:600;padding:10px 18px;border-radius:var(--radius-sm)}
@@ -167,7 +198,7 @@ select{cursor:pointer}
   color:var(--text);font-family:var(--font);position:relative;overflow:hidden;
 }
 .mood-card::before{content:"";position:absolute;inset:0;background:radial-gradient(circle at 50% 0%,var(--accent-glow) 0%,transparent 70%);opacity:0;transition:opacity var(--ease)}
-.mood-card:hover{border-color:var(--accent);transform:translateY(-3px);box-shadow:0 8px 30px rgba(0,0,0,0.3)}
+.mood-card:hover{border-color:var(--accent);transform:translateY(-3px);box-shadow:0 8px 30px rgba(0,0,0,0.3),0 0 20px var(--accent-glow2)}
 .mood-card:hover::before{opacity:1}
 .mood-card.selected{border-color:var(--accent);background:rgba(139,92,246,0.08);box-shadow:0 0 30px var(--accent-glow)}
 .mood-card.selected::before{opacity:1}
@@ -213,7 +244,7 @@ select{cursor:pointer}
   padding:16px;cursor:pointer;transition:all var(--ease);position:relative;overflow:hidden;
 }
 .raga-card::after{content:"";position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,var(--accent),var(--pink));opacity:0;transition:opacity var(--ease)}
-.raga-card:hover{border-color:var(--accent);transform:translateY(-2px);box-shadow:0 6px 24px rgba(0,0,0,0.3)}
+.raga-card:hover{border-color:var(--accent);transform:translateY(-3px);box-shadow:0 6px 24px rgba(0,0,0,0.3),0 0 16px var(--accent-glow2)}
 .raga-card:hover::after{opacity:1}
 .raga-card-name{font-size:0.92rem;font-weight:700;margin-bottom:2px;color:var(--text)}
 .raga-card-aka{font-size:0.68rem;color:var(--muted);margin-bottom:6px;font-style:italic}

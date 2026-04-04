@@ -1537,9 +1537,110 @@
   }
 
   /* ================================================================
+     AMBIENT BACKGROUND (Sonora-inspired)
+     Subtle floating music symbols + soft glowing orbs
+     ================================================================ */
+  function initAmbientCanvas() {
+    const canvas = document.getElementById("ambientCanvas");
+    if (!canvas) return;
+    const c = canvas.getContext("2d");
+    let W, H, particles = [];
+
+    const SYMBOLS = ["\u266A","\u266B","\u266C","\u2669","\u{1D11E}","\u{1D122}"];
+    const ORB_COLORS = ["139,92,246","236,72,153","6,182,212","245,158,11"];
+
+    function resize() {
+      W = canvas.width = window.innerWidth;
+      H = canvas.height = window.innerHeight;
+    }
+    window.addEventListener("resize", resize);
+    resize();
+
+    function seed() {
+      particles = [];
+      const count = Math.min(28, Math.floor((W * H) / 40000));
+      for (let i = 0; i < count; i++) {
+        const type = Math.random();
+        if (type < 0.5) {
+          // Music note
+          particles.push({
+            type: "note",
+            x: Math.random() * W,
+            y: Math.random() * H,
+            vx: (Math.random() - 0.5) * 0.15,
+            vy: -(Math.random() * 0.2 + 0.06),
+            char: SYMBOLS[Math.floor(Math.random() * SYMBOLS.length)],
+            size: 10 + Math.random() * 14,
+            alpha: 0.03 + Math.random() * 0.07,
+            rot: Math.random() * Math.PI * 2,
+            rotV: (Math.random() - 0.5) * 0.004,
+          });
+        } else {
+          // Soft orb
+          const col = ORB_COLORS[Math.floor(Math.random() * ORB_COLORS.length)];
+          particles.push({
+            type: "orb",
+            x: Math.random() * W,
+            y: Math.random() * H,
+            vx: (Math.random() - 0.5) * 0.12,
+            vy: (Math.random() - 0.5) * 0.12,
+            r: 40 + Math.random() * 80,
+            color: col,
+            alpha: 0.02 + Math.random() * 0.04,
+            ph: Math.random() * Math.PI * 2,
+            phV: 0.003 + Math.random() * 0.005,
+          });
+        }
+      }
+    }
+    seed();
+
+    function draw() {
+      requestAnimationFrame(draw);
+      c.clearRect(0, 0, W, H);
+      particles.forEach(p => {
+        p.x += p.vx;
+        p.y += p.vy;
+        // Wrap
+        if (p.type === "note") {
+          if (p.y < -30) { p.y = H + 20; p.x = Math.random() * W; }
+          if (p.x < -30) p.x = W + 20;
+          if (p.x > W + 30) p.x = -20;
+          p.rot += p.rotV;
+          c.save();
+          c.translate(p.x, p.y);
+          c.rotate(p.rot);
+          c.font = `${p.size}px serif`;
+          c.fillStyle = `rgba(167,139,250,${p.alpha})`;
+          c.textAlign = "center";
+          c.textBaseline = "middle";
+          c.fillText(p.char, 0, 0);
+          c.restore();
+        } else {
+          if (p.x < -p.r) p.x = W + p.r;
+          if (p.x > W + p.r) p.x = -p.r;
+          if (p.y < -p.r) p.y = H + p.r;
+          if (p.y > H + p.r) p.y = -p.r;
+          p.ph += p.phV;
+          const a = p.alpha * (0.6 + 0.4 * Math.sin(p.ph));
+          const grad = c.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.r);
+          grad.addColorStop(0, `rgba(${p.color},${a})`);
+          grad.addColorStop(1, `rgba(${p.color},0)`);
+          c.fillStyle = grad;
+          c.beginPath();
+          c.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+          c.fill();
+        }
+      });
+    }
+    draw();
+  }
+
+  /* ================================================================
      INIT
      ================================================================ */
   function init() {
+    initAmbientCanvas();
     initNav();
     initTabs();
     initHeroViz();
