@@ -1,543 +1,815 @@
 /* ============================================================
-   MusiciAIn — AI Music Composer Engine
-   Web Audio API — fully browser-based
+   MusiciAIn — Professional AI Music Composer Engine
+   Real chord progressions, multi-layer composition,
+   motif-based melody, tanpura drone, pro drum synthesis
    ============================================================ */
 (function () {
   "use strict";
 
-  // ======================== AUDIO CONTEXT ========================
+  /* ================================================================
+     1. AUDIO ENGINE
+     ================================================================ */
   let ctx = null;
   let masterGain = null;
-  let reverbNode = null;
   let analyser = null;
+  let reverbNode = null;
+  let delayNode = null;
+  let delayFeedback = null;
+  let delayWet = null;
 
   function initAudio() {
-    if (ctx) return;
+    if (ctx) { if (ctx.state === "suspended") ctx.resume(); return; }
     ctx = new (window.AudioContext || window.webkitAudioContext)();
     masterGain = ctx.createGain();
-    masterGain.gain.value = 0.7;
+    masterGain.gain.value = 0.75;
     analyser = ctx.createAnalyser();
-    analyser.fftSize = 256;
+    analyser.fftSize = 512;
     masterGain.connect(analyser);
     analyser.connect(ctx.destination);
-    createReverb();
+    buildReverb();
+    buildDelay();
   }
 
-  function createReverb() {
+  function buildReverb() {
     reverbNode = ctx.createConvolver();
-    const rate = ctx.sampleRate;
-    const length = rate * 2;
-    const impulse = ctx.createBuffer(2, length, rate);
+    const len = ctx.sampleRate * 2.5;
+    const buf = ctx.createBuffer(2, len, ctx.sampleRate);
     for (let ch = 0; ch < 2; ch++) {
-      const data = impulse.getChannelData(ch);
-      for (let i = 0; i < length; i++) {
-        data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / length, 2.5);
+      const d = buf.getChannelData(ch);
+      for (let i = 0; i < len; i++) {
+        d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.8);
       }
     }
-    reverbNode.buffer = impulse;
+    reverbNode.buffer = buf;
   }
 
-  // ======================== NOTE FREQUENCIES ========================
-  const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-  function noteFreq(note, octave) {
-    const idx = NOTE_NAMES.indexOf(note);
-    if (idx === -1) return 440;
-    const midi = (octave + 1) * 12 + idx;
-    return 440 * Math.pow(2, (midi - 69) / 12);
+  function buildDelay() {
+    delayNode = ctx.createDelay(1.0);
+    delayNode.delayTime.value = 0.35;
+    delayFeedback = ctx.createGain();
+    delayFeedback.gain.value = 0.3;
+    delayWet = ctx.createGain();
+    delayWet.gain.value = 0;
+    delayNode.connect(delayFeedback);
+    delayFeedback.connect(delayNode);
+    delayNode.connect(delayWet);
+    delayWet.connect(masterGain);
   }
 
-  // ======================== SCALES ========================
+  /* ================================================================
+     2. MUSIC THEORY ENGINE
+     ================================================================ */
+  const NOTES = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+
+  function midiToFreq(midi) { return 440 * Math.pow(2, (midi - 69) / 12); }
+  function noteToMidi(note, octave) { return (octave + 1) * 12 + NOTES.indexOf(note); }
+
   const SCALES = {
-    major:       [0, 2, 4, 5, 7, 9, 11],
-    minor:       [0, 2, 3, 5, 7, 8, 10],
-    pentatonic:  [0, 2, 4, 7, 9],
-    blues:       [0, 3, 5, 6, 7, 10],
-    dorian:      [0, 2, 3, 5, 7, 9, 10],
-    mixolydian:  [0, 2, 4, 5, 7, 9, 10],
+    major:          [0,2,4,5,7,9,11],
+    minor:          [0,2,3,5,7,8,10],
+    harmonicMinor:  [0,2,3,5,7,8,11],
+    melodicMinor:   [0,2,3,5,7,9,11],
+    pentatonic:     [0,2,4,7,9],
+    minorPentatonic:[0,3,5,7,10],
+    blues:          [0,3,5,6,7,10],
+    dorian:         [0,2,3,5,7,9,10],
+    mixolydian:     [0,2,4,5,7,9,10],
+    lydian:         [0,2,4,6,7,9,11],
+    phrygian:       [0,1,3,5,7,8,10],
   };
 
-  function getScaleFreqs(key, scale, octave, numOctaves) {
-    const intervals = SCALES[scale] || SCALES.major;
-    const root = NOTE_NAMES.indexOf(key);
-    const freqs = [];
-    for (let o = 0; o < numOctaves; o++) {
-      for (const interval of intervals) {
-        const midi = (octave + o + 1) * 12 + root + interval;
-        freqs.push(440 * Math.pow(2, (midi - 69) / 12));
-      }
-    }
-    return freqs;
+  // Chord quality definitions (intervals from root)
+  const CHORD_TYPES = {
+    maj:  [0,4,7],
+    min:  [0,3,7],
+    dim:  [0,3,6],
+    aug:  [0,4,8],
+    sus2: [0,2,7],
+    sus4: [0,5,7],
+    maj7: [0,4,7,11],
+    min7: [0,3,7,10],
+    dom7: [0,4,7,10],
+    dim7: [0,3,6,9],
+  };
+
+  // Diatonic chords for major scale: I ii iii IV V vi vii°
+  function getDiatonicChords(rootNote, scaleType) {
+    const scale = SCALES[scaleType] || SCALES.major;
+    const root = NOTES.indexOf(rootNote);
+    if (scale.length < 7) return getMajorDiatonic(rootNote); // fallback for pentatonic etc.
+
+    const qualities = scaleType === "major" || scaleType === "lydian" || scaleType === "mixolydian"
+      ? ["maj","min","min","maj","maj","min","dim"]
+      : ["min","dim","maj","min","min","maj","maj"]; // minor-type
+
+    return scale.map((interval, i) => ({
+      root: (root + interval) % 12,
+      quality: qualities[i] || "maj",
+      degree: i + 1,
+      notes: CHORD_TYPES[qualities[i]].map(n => (root + interval + n) % 12),
+    }));
   }
 
-  // ======================== SYNTH VOICES ========================
-  function playNote(freq, duration, type, startTime, vol) {
-    if (!ctx) return;
-    const t = startTime || ctx.currentTime;
-    const v = vol || 0.3;
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = type || "triangle";
-    osc.frequency.setValueAtTime(freq, t);
-    gain.gain.setValueAtTime(0, t);
-    gain.gain.linearRampToValueAtTime(v, t + 0.02);
-    gain.gain.setValueAtTime(v, t + duration * 0.7);
-    gain.gain.exponentialRampToValueAtTime(0.001, t + duration);
-    osc.connect(gain);
-    gain.connect(masterGain);
-    osc.start(t);
-    osc.stop(t + duration);
+  function getMajorDiatonic(rootNote) {
+    return getDiatonicChords(rootNote, "major");
   }
 
-  function playInstrumentNote(freq, duration, instrument, startTime, vol) {
+  // Chord progressions per mood (using scale degrees, 1-indexed)
+  const PROGRESSIONS = {
+    happy:      [[1,5,6,4], [1,4,5,5], [1,4,6,5], [1,5,4,5]],
+    sad:        [[1,6,4,5], [6,4,1,5], [1,4,6,4], [1,3,4,5]],
+    romantic:   [[1,6,4,5], [1,3,4,5], [4,5,6,1], [1,5,6,4]],
+    energetic:  [[1,5,6,4], [1,4,5,5], [6,4,1,5], [1,5,4,5]],
+    calm:       [[1,4,1,5], [1,6,4,1], [4,1,5,1], [1,4,5,4]],
+    melancholy: [[6,4,1,5], [1,6,3,4], [6,5,4,5], [1,4,6,5]],
+    triumphant: [[1,5,6,4], [1,4,5,1], [4,5,1,1], [1,5,4,5]],
+    mysterious: [[1,7,6,5], [1,2,4,5], [6,7,1,5], [1,4,7,6]],
+    devotional: [[1,4,5,1], [1,5,4,1], [4,5,1,4], [1,4,1,5]],
+    playful:    [[1,5,6,4], [1,4,5,4], [4,5,1,5], [1,6,4,5]],
+    epic:       [[6,4,1,5], [1,5,6,4], [4,1,5,6], [6,5,4,1]],
+    nostalgia:  [[1,6,4,5], [1,4,6,5], [4,1,5,6], [1,5,4,6]],
+  };
+
+  // Song structures
+  const STRUCTURES = {
+    short:    ["intro","verse","chorus","outro"],
+    medium:   ["intro","verse","chorus","verse","chorus","bridge","chorus","outro"],
+    long:     ["intro","verse","verse","chorus","verse","chorus","bridge","chorus","chorus","outro"],
+  };
+
+  /* ================================================================
+     3. PROFESSIONAL SYNTH ENGINE
+     ================================================================ */
+  const INSTRUMENTS = {
+    piano: {
+      oscs: [{type:"triangle",detune:0,gain:0.6},{type:"sine",detune:1,gain:0.3},{type:"sine",detune:-700,gain:0.15}],
+      attack:0.008, decay:0.25, sustain:0.35, release:0.3
+    },
+    synth: {
+      oscs: [{type:"sawtooth",detune:0,gain:0.4},{type:"sawtooth",detune:7,gain:0.3},{type:"square",detune:-5,gain:0.15}],
+      attack:0.03, decay:0.15, sustain:0.6, release:0.2
+    },
+    strings: {
+      oscs: [{type:"sawtooth",detune:0,gain:0.25},{type:"sawtooth",detune:5,gain:0.25},{type:"sawtooth",detune:-5,gain:0.2},{type:"sine",detune:0,gain:0.15}],
+      attack:0.12, decay:0.3, sustain:0.7, release:0.4
+    },
+    flute: {
+      oscs: [{type:"sine",detune:0,gain:0.5},{type:"sine",detune:1200,gain:0.08},{type:"triangle",detune:0,gain:0.15}],
+      attack:0.06, decay:0.1, sustain:0.55, release:0.2, vibrato:{rate:5,depth:4}
+    },
+    sitar: {
+      oscs: [{type:"sawtooth",detune:0,gain:0.35},{type:"square",detune:1,gain:0.2},{type:"sawtooth",detune:1200,gain:0.1}],
+      attack:0.003, decay:0.12, sustain:0.15, release:0.5, vibrato:{rate:5.5,depth:6}
+    },
+    pad: {
+      oscs: [{type:"sine",detune:0,gain:0.3},{type:"triangle",detune:3,gain:0.2},{type:"sine",detune:-3,gain:0.2}],
+      attack:0.3, decay:0.5, sustain:0.7, release:0.6
+    },
+    bass: {
+      oscs: [{type:"sine",detune:0,gain:0.6},{type:"triangle",detune:0,gain:0.25},{type:"square",detune:0,gain:0.08}],
+      attack:0.01, decay:0.15, sustain:0.5, release:0.12
+    },
+    arp: {
+      oscs: [{type:"triangle",detune:0,gain:0.45},{type:"sine",detune:2,gain:0.2}],
+      attack:0.005, decay:0.08, sustain:0.3, release:0.15
+    },
+  };
+
+  function synthNote(freq, dur, instName, startTime, vol, useReverb) {
     if (!ctx) return;
     const t = startTime || ctx.currentTime;
-    const v = vol || 0.3;
-    const instruments = {
-      piano:   { type: "triangle", attack: 0.01,  decay: 0.3,  sustain: 0.4  },
-      synth:   { type: "sawtooth", attack: 0.05,  decay: 0.2,  sustain: 0.6  },
-      strings: { type: "sine",     attack: 0.15,  decay: 0.4,  sustain: 0.7  },
-      flute:   { type: "sine",     attack: 0.08,  decay: 0.1,  sustain: 0.5  },
-      sitar:   { type: "sawtooth", attack: 0.005, decay: 0.15, sustain: 0.2  },
-    };
-    const inst = instruments[instrument] || instruments.piano;
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = inst.type;
-    osc.frequency.setValueAtTime(freq, t);
+    const v = vol || 0.25;
+    const inst = INSTRUMENTS[instName] || INSTRUMENTS.piano;
+    const envelope = ctx.createGain();
 
-    // Sitar vibrato
-    if (instrument === "sitar") {
-      const vibrato = ctx.createOscillator();
-      const vibratoGain = ctx.createGain();
-      vibrato.frequency.value = 5;
-      vibratoGain.gain.value = 3;
-      vibrato.connect(vibratoGain);
-      vibratoGain.connect(osc.frequency);
-      vibrato.start(t);
-      vibrato.stop(t + duration);
+    // ADSR
+    envelope.gain.setValueAtTime(0, t);
+    envelope.gain.linearRampToValueAtTime(v, t + inst.attack);
+    envelope.gain.linearRampToValueAtTime(v * inst.sustain, t + inst.attack + inst.decay);
+    const releaseStart = t + dur - inst.release;
+    if (releaseStart > t + inst.attack + inst.decay) {
+      envelope.gain.setValueAtTime(v * inst.sustain, releaseStart);
+    }
+    envelope.gain.linearRampToValueAtTime(0.001, t + dur);
+
+    // Oscillators
+    inst.oscs.forEach(osc_def => {
+      const osc = ctx.createOscillator();
+      const oscGain = ctx.createGain();
+      osc.type = osc_def.type;
+      osc.frequency.setValueAtTime(freq, t);
+      osc.detune.setValueAtTime(osc_def.detune || 0, t);
+      oscGain.gain.value = osc_def.gain;
+      osc.connect(oscGain);
+      oscGain.connect(envelope);
+      osc.start(t);
+      osc.stop(t + dur + 0.05);
+    });
+
+    // Vibrato
+    if (inst.vibrato) {
+      const vib = ctx.createOscillator();
+      const vibGain = ctx.createGain();
+      vib.frequency.value = inst.vibrato.rate;
+      vibGain.gain.value = inst.vibrato.depth;
+      vib.connect(vibGain);
+      inst.oscs.forEach((_, i) => {
+        // Apply to first osc frequency
+      });
+      vib.start(t);
+      vib.stop(t + dur + 0.05);
     }
 
-    // ADSR envelope
-    gain.gain.setValueAtTime(0, t);
-    gain.gain.linearRampToValueAtTime(v, t + inst.attack);
-    gain.gain.exponentialRampToValueAtTime(v * inst.sustain, t + inst.attack + inst.decay);
-    gain.gain.setValueAtTime(v * inst.sustain, t + duration * 0.8);
-    gain.gain.exponentialRampToValueAtTime(0.001, t + duration);
-
-    osc.connect(gain);
-
-    // Optional reverb
-    const reverbAmt = parseFloat(document.getElementById("fpReverb")?.value || 30) / 100;
-    if (reverbAmt > 0 && reverbNode) {
-      const dryGain = ctx.createGain();
+    // Routing
+    envelope.connect(masterGain);
+    if (useReverb && reverbNode) {
       const wetGain = ctx.createGain();
-      dryGain.gain.value = 1 - reverbAmt * 0.5;
-      wetGain.gain.value = reverbAmt * 0.5;
-      gain.connect(dryGain);
-      gain.connect(reverbNode);
+      wetGain.gain.value = 0.15;
+      envelope.connect(reverbNode);
       reverbNode.connect(wetGain);
-      dryGain.connect(masterGain);
       wetGain.connect(masterGain);
-    } else {
-      gain.connect(masterGain);
     }
-    osc.connect(gain);
-    osc.start(t);
-    osc.stop(t + duration + 0.05);
   }
 
-  // ======================== DRUM SYNTH ========================
-  function playDrum(type, time) {
+  /* ================================================================
+     4. PROFESSIONAL DRUM SYNTHESIS
+     ================================================================ */
+  function synthDrum(type, time, vel) {
     if (!ctx) return;
     const t = time || ctx.currentTime;
+    const v = vel || 0.7;
+
     switch (type) {
       case "kick": {
+        // Body
         const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.frequency.setValueAtTime(150, t);
-        osc.frequency.exponentialRampToValueAtTime(40, t + 0.12);
-        gain.gain.setValueAtTime(1, t);
-        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.35);
-        osc.connect(gain);
-        gain.connect(masterGain);
-        osc.start(t);
-        osc.stop(t + 0.35);
+        const g = ctx.createGain();
+        osc.frequency.setValueAtTime(160, t);
+        osc.frequency.exponentialRampToValueAtTime(35, t + 0.15);
+        g.gain.setValueAtTime(v, t);
+        g.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
+        osc.connect(g); g.connect(masterGain);
+        osc.start(t); osc.stop(t + 0.4);
+        // Click
+        const click = ctx.createOscillator();
+        const cg = ctx.createGain();
+        click.type = "square";
+        click.frequency.setValueAtTime(1500, t);
+        click.frequency.exponentialRampToValueAtTime(200, t + 0.01);
+        cg.gain.setValueAtTime(v * 0.4, t);
+        cg.gain.exponentialRampToValueAtTime(0.001, t + 0.025);
+        click.connect(cg); cg.connect(masterGain);
+        click.start(t); click.stop(t + 0.03);
         break;
       }
       case "snare": {
+        // Body
+        const osc = ctx.createOscillator();
+        const og = ctx.createGain();
+        osc.frequency.setValueAtTime(250, t);
+        osc.frequency.exponentialRampToValueAtTime(120, t + 0.05);
+        og.gain.setValueAtTime(v * 0.6, t);
+        og.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+        osc.connect(og); og.connect(masterGain);
+        osc.start(t); osc.stop(t + 0.12);
+        // Noise
         const noise = ctx.createBufferSource();
-        const buf = ctx.createBuffer(1, ctx.sampleRate * 0.15, ctx.sampleRate);
-        const d = buf.getChannelData(0);
-        for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
-        noise.buffer = buf;
-        const gain = ctx.createGain();
-        const filter = ctx.createBiquadFilter();
-        filter.type = "highpass";
-        filter.frequency.value = 1000;
-        gain.gain.setValueAtTime(0.7, t);
-        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.15);
-        noise.connect(filter);
-        filter.connect(gain);
-        gain.connect(masterGain);
-        noise.start(t);
-        noise.stop(t + 0.15);
+        const nb = ctx.createBuffer(1, ctx.sampleRate * 0.18, ctx.sampleRate);
+        const nd = nb.getChannelData(0);
+        for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
+        noise.buffer = nb;
+        const ng = ctx.createGain();
+        const hp = ctx.createBiquadFilter();
+        hp.type = "highpass"; hp.frequency.value = 2000;
+        ng.gain.setValueAtTime(v * 0.55, t);
+        ng.gain.exponentialRampToValueAtTime(0.001, t + 0.18);
+        noise.connect(hp); hp.connect(ng); ng.connect(masterGain);
+        noise.start(t); noise.stop(t + 0.18);
         break;
       }
       case "hihat": {
         const noise = ctx.createBufferSource();
-        const buf = ctx.createBuffer(1, ctx.sampleRate * 0.05, ctx.sampleRate);
-        const d = buf.getChannelData(0);
-        for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
-        noise.buffer = buf;
-        const gain = ctx.createGain();
-        const filter = ctx.createBiquadFilter();
-        filter.type = "highpass";
-        filter.frequency.value = 6000;
-        gain.gain.setValueAtTime(0.3, t);
-        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
-        noise.connect(filter);
-        filter.connect(gain);
-        gain.connect(masterGain);
-        noise.start(t);
-        noise.stop(t + 0.05);
+        const nb = ctx.createBuffer(1, ctx.sampleRate * 0.04, ctx.sampleRate);
+        const nd = nb.getChannelData(0);
+        for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
+        noise.buffer = nb;
+        const g = ctx.createGain();
+        const bp = ctx.createBiquadFilter();
+        bp.type = "bandpass"; bp.frequency.value = 10000; bp.Q.value = 1;
+        g.gain.setValueAtTime(v * 0.3, t);
+        g.gain.exponentialRampToValueAtTime(0.001, t + 0.04);
+        noise.connect(bp); bp.connect(g); g.connect(masterGain);
+        noise.start(t); noise.stop(t + 0.04);
         break;
       }
       case "openhat": {
         const noise = ctx.createBufferSource();
-        const buf = ctx.createBuffer(1, ctx.sampleRate * 0.2, ctx.sampleRate);
-        const d = buf.getChannelData(0);
-        for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
-        noise.buffer = buf;
-        const gain = ctx.createGain();
-        const filter = ctx.createBiquadFilter();
-        filter.type = "highpass";
-        filter.frequency.value = 4000;
-        gain.gain.setValueAtTime(0.3, t);
-        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.2);
-        noise.connect(filter);
-        filter.connect(gain);
-        gain.connect(masterGain);
-        noise.start(t);
-        noise.stop(t + 0.2);
+        const nb = ctx.createBuffer(1, ctx.sampleRate * 0.25, ctx.sampleRate);
+        const nd = nb.getChannelData(0);
+        for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
+        noise.buffer = nb;
+        const g = ctx.createGain();
+        const bp = ctx.createBiquadFilter();
+        bp.type = "bandpass"; bp.frequency.value = 8000; bp.Q.value = 0.8;
+        g.gain.setValueAtTime(v * 0.3, t);
+        g.gain.exponentialRampToValueAtTime(0.001, t + 0.25);
+        noise.connect(bp); bp.connect(g); g.connect(masterGain);
+        noise.start(t); noise.stop(t + 0.25);
         break;
       }
       case "clap": {
-        for (let i = 0; i < 3; i++) {
+        for (let i = 0; i < 4; i++) {
           const noise = ctx.createBufferSource();
-          const buf = ctx.createBuffer(1, ctx.sampleRate * 0.02, ctx.sampleRate);
-          const d = buf.getChannelData(0);
-          for (let j = 0; j < d.length; j++) d[j] = Math.random() * 2 - 1;
-          noise.buffer = buf;
-          const gain = ctx.createGain();
-          const filter = ctx.createBiquadFilter();
-          filter.type = "bandpass";
-          filter.frequency.value = 2000;
-          gain.gain.setValueAtTime(0.5, t + i * 0.01);
-          gain.gain.exponentialRampToValueAtTime(0.001, t + i * 0.01 + 0.08);
-          noise.connect(filter);
-          filter.connect(gain);
-          gain.connect(masterGain);
-          noise.start(t + i * 0.01);
-          noise.stop(t + i * 0.01 + 0.08);
+          const nb = ctx.createBuffer(1, ctx.sampleRate * 0.015, ctx.sampleRate);
+          const nd = nb.getChannelData(0);
+          for (let j = 0; j < nd.length; j++) nd[j] = Math.random() * 2 - 1;
+          noise.buffer = nb;
+          const g = ctx.createGain();
+          const bp = ctx.createBiquadFilter();
+          bp.type = "bandpass"; bp.frequency.value = 2500; bp.Q.value = 0.5;
+          const offset = i * 0.008;
+          g.gain.setValueAtTime(v * 0.4, t + offset);
+          g.gain.exponentialRampToValueAtTime(0.001, t + offset + 0.07);
+          noise.connect(bp); bp.connect(g); g.connect(masterGain);
+          noise.start(t + offset); noise.stop(t + offset + 0.07);
         }
+        // Tail
+        const tail = ctx.createBufferSource();
+        const tb = ctx.createBuffer(1, ctx.sampleRate * 0.15, ctx.sampleRate);
+        const td = tb.getChannelData(0);
+        for (let i = 0; i < td.length; i++) td[i] = Math.random() * 2 - 1;
+        tail.buffer = tb;
+        const tg = ctx.createGain();
+        const thp = ctx.createBiquadFilter();
+        thp.type = "highpass"; thp.frequency.value = 1500;
+        tg.gain.setValueAtTime(v * 0.25, t + 0.032);
+        tg.gain.exponentialRampToValueAtTime(0.001, t + 0.15);
+        tail.connect(thp); thp.connect(tg); tg.connect(masterGain);
+        tail.start(t + 0.032); tail.stop(t + 0.15);
         break;
       }
       case "tom": {
         const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.frequency.setValueAtTime(200, t);
-        osc.frequency.exponentialRampToValueAtTime(80, t + 0.15);
-        gain.gain.setValueAtTime(0.6, t);
-        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.25);
-        osc.connect(gain);
-        gain.connect(masterGain);
-        osc.start(t);
-        osc.stop(t + 0.25);
+        const g = ctx.createGain();
+        osc.frequency.setValueAtTime(220, t);
+        osc.frequency.exponentialRampToValueAtTime(70, t + 0.18);
+        g.gain.setValueAtTime(v * 0.5, t);
+        g.gain.exponentialRampToValueAtTime(0.001, t + 0.3);
+        osc.connect(g); g.connect(masterGain);
+        osc.start(t); osc.stop(t + 0.3);
         break;
       }
       case "rim": {
         const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
+        const g = ctx.createGain();
         osc.type = "square";
-        osc.frequency.setValueAtTime(800, t);
-        gain.gain.setValueAtTime(0.3, t);
-        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.03);
-        osc.connect(gain);
-        gain.connect(masterGain);
-        osc.start(t);
-        osc.stop(t + 0.03);
+        osc.frequency.setValueAtTime(900, t);
+        osc.frequency.setValueAtTime(600, t + 0.005);
+        g.gain.setValueAtTime(v * 0.3, t);
+        g.gain.exponentialRampToValueAtTime(0.001, t + 0.025);
+        osc.connect(g); g.connect(masterGain);
+        osc.start(t); osc.stop(t + 0.03);
         break;
       }
       case "shaker": {
         const noise = ctx.createBufferSource();
-        const buf = ctx.createBuffer(1, ctx.sampleRate * 0.06, ctx.sampleRate);
-        const d = buf.getChannelData(0);
-        for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * 0.3;
-        noise.buffer = buf;
-        const gain = ctx.createGain();
-        const filter = ctx.createBiquadFilter();
-        filter.type = "highpass";
-        filter.frequency.value = 8000;
-        gain.gain.setValueAtTime(0.2, t);
-        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.06);
-        noise.connect(filter);
-        filter.connect(gain);
-        gain.connect(masterGain);
-        noise.start(t);
-        noise.stop(t + 0.06);
+        const nb = ctx.createBuffer(1, ctx.sampleRate * 0.05, ctx.sampleRate);
+        const nd = nb.getChannelData(0);
+        for (let i = 0; i < nd.length; i++) nd[i] = (Math.random() * 2 - 1) * 0.5;
+        noise.buffer = nb;
+        const g = ctx.createGain();
+        const hp = ctx.createBiquadFilter();
+        hp.type = "highpass"; hp.frequency.value = 9000;
+        g.gain.setValueAtTime(v * 0.2, t);
+        g.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
+        noise.connect(hp); hp.connect(g); g.connect(masterGain);
+        noise.start(t); noise.stop(t + 0.05);
         break;
       }
     }
   }
 
-  // ======================== MOOD → MUSIC AI ========================
-  const MOOD_PROFILES = {
-    happy:      { scale: "major",      tempo: 130, octave: 4, patterns: "ascending",  energy: 0.8  },
-    sad:        { scale: "minor",      tempo: 80,  octave: 3, patterns: "descending", energy: 0.3  },
-    romantic:   { scale: "major",      tempo: 90,  octave: 4, patterns: "smooth",     energy: 0.5  },
-    energetic:  { scale: "pentatonic", tempo: 150, octave: 4, patterns: "jumping",    energy: 1.0  },
-    calm:       { scale: "pentatonic", tempo: 70,  octave: 4, patterns: "stepwise",   energy: 0.2  },
-    melancholy: { scale: "minor",      tempo: 75,  octave: 3, patterns: "descending", energy: 0.25 },
-    triumphant: { scale: "major",      tempo: 140, octave: 4, patterns: "ascending",  energy: 0.9  },
-    mysterious: { scale: "dorian",     tempo: 85,  octave: 3, patterns: "chromatic",  energy: 0.4  },
-    devotional: { scale: "pentatonic", tempo: 72,  octave: 3, patterns: "stepwise",   energy: 0.3  },
-    playful:    { scale: "mixolydian", tempo: 135, octave: 4, patterns: "jumping",    energy: 0.75 },
-    epic:       { scale: "minor",      tempo: 100, octave: 3, patterns: "wide",       energy: 0.85 },
-    nostalgia:  { scale: "pentatonic", tempo: 88,  octave: 4, patterns: "smooth",     energy: 0.4  },
-  };
+  /* ================================================================
+     5. TANPURA DRONE ENGINE
+     ================================================================ */
+  let tanpuraOscs = [];
+  let tanpuraGain = null;
+  let tanpuraActive = false;
 
-  function generateMelody(mood, key, scale, tempo, bars) {
-    const profile = MOOD_PROFILES[mood] || MOOD_PROFILES.happy;
-    const useScale = scale || profile.scale;
-    const useTempo = tempo || profile.tempo;
-    const intervals = SCALES[useScale] || SCALES.major;
-    const rootIdx = NOTE_NAMES.indexOf(key || "C");
-    const octave = profile.octave;
-    const beatDur = 60 / useTempo;
-    const totalBeats = (bars || 16) * 4;
+  function startTanpura(rootNote, volume) {
+    stopTanpura();
+    initAudio();
+    tanpuraActive = true;
+    const rootMidi = noteToMidi(rootNote, 3);
+    const saFreq = midiToFreq(rootMidi);
+    const paFreq = midiToFreq(rootMidi + 7); // Perfect 5th
+    const saLowFreq = midiToFreq(rootMidi - 12); // Sa lower octave
 
-    const notes = [];
-    let prevIdx = Math.floor(intervals.length / 2);
-    let t = 0;
+    tanpuraGain = ctx.createGain();
+    tanpuraGain.gain.value = volume;
 
-    for (let beat = 0; beat < totalBeats; beat++) {
-      // Rest probability based on energy
-      if (Math.random() > profile.energy + 0.3) {
-        t += beatDur;
-        continue;
-      }
+    // 4-string tanpura: Pa, Sa, Sa, Sa(lower)
+    const stringFreqs = [paFreq, saFreq, saFreq, saLowFreq];
+    stringFreqs.forEach((freq, i) => {
+      // Rich tanpura tone: fundamental + harmonics
+      [1, 2, 3, 4, 5].forEach(harmonic => {
+        const osc = ctx.createOscillator();
+        const oscGain = ctx.createGain();
+        osc.type = "sine";
+        osc.frequency.value = freq * harmonic;
+        oscGain.gain.value = (0.15 / harmonic) * (i === 3 ? 1.2 : 1); // bass string louder
+        // Slow amplitude modulation for organic feel
+        const lfo = ctx.createOscillator();
+        const lfoGain = ctx.createGain();
+        lfo.frequency.value = 0.15 + i * 0.05 + harmonic * 0.02;
+        lfoGain.gain.value = oscGain.gain.value * 0.3;
+        lfo.connect(lfoGain);
+        lfoGain.connect(oscGain.gain);
+        lfo.start();
 
-      // Duration variety
-      const durChoices = [beatDur * 0.5, beatDur, beatDur * 1.5, beatDur * 2];
-      const durWeights = profile.energy > 0.6 ? [0.4, 0.4, 0.15, 0.05] : [0.1, 0.3, 0.35, 0.25];
-      let r = Math.random(), cumul = 0, dur = beatDur;
-      for (let i = 0; i < durChoices.length; i++) {
-        cumul += durWeights[i];
-        if (r < cumul) { dur = durChoices[i]; break; }
-      }
+        osc.connect(oscGain);
+        oscGain.connect(tanpuraGain);
+        osc.start();
+        tanpuraOscs.push(osc, lfo);
+      });
+    });
 
-      // Note selection based on pattern
-      let nextIdx;
-      switch (profile.patterns) {
-        case "ascending":
-          nextIdx = prevIdx + Math.floor(Math.random() * 3);
-          break;
-        case "descending":
-          nextIdx = prevIdx - Math.floor(Math.random() * 3);
-          break;
-        case "stepwise":
-          nextIdx = prevIdx + (Math.random() > 0.5 ? 1 : -1);
-          break;
-        case "jumping":
-          nextIdx = prevIdx + Math.floor(Math.random() * 5) - 2;
-          break;
-        case "smooth":
-          nextIdx = prevIdx + (Math.random() > 0.5 ? 1 : -1) * (Math.random() > 0.7 ? 2 : 1);
-          break;
-        case "chromatic":
-          nextIdx = prevIdx + (Math.random() > 0.5 ? 1 : -1);
-          if (Math.random() > 0.7) nextIdx += Math.random() > 0.5 ? 2 : -2;
-          break;
-        case "wide":
-          nextIdx = prevIdx + Math.floor(Math.random() * 7) - 3;
-          break;
-        default:
-          nextIdx = prevIdx + Math.floor(Math.random() * 3) - 1;
-      }
-
-      // Wrap to scale range
-      const totalNotes = intervals.length * 2;
-      nextIdx = Math.max(0, Math.min(totalNotes - 1, nextIdx));
-      const scaleOctaveOffset = Math.floor(nextIdx / intervals.length);
-      const scaleNoteIdx = nextIdx % intervals.length;
-      const midi = (octave + scaleOctaveOffset + 1) * 12 + rootIdx + intervals[scaleNoteIdx];
-      const freq = 440 * Math.pow(2, (midi - 69) / 12);
-
-      notes.push({ freq, time: t, duration: dur, midi });
-      prevIdx = nextIdx;
-      t += dur;
-      if (t >= totalBeats * beatDur) break;
-    }
-
-    return notes;
+    tanpuraGain.connect(masterGain);
   }
 
-  // ======================== RAGA DATA ========================
-  const SWARAS = { S: 0, R1: 1, R2: 2, G1: 3, G2: 4, M1: 5, M2: 6, P: 7, D1: 8, D2: 9, N1: 10, N2: 11 };
+  function stopTanpura() {
+    tanpuraActive = false;
+    tanpuraOscs.forEach(o => { try { o.stop(); } catch(e) {} });
+    tanpuraOscs = [];
+    if (tanpuraGain) { try { tanpuraGain.disconnect(); } catch(e) {} tanpuraGain = null; }
+  }
+
+  /* ================================================================
+     6. COMPOSITION AI ENGINE (Mood Composer)
+     ================================================================ */
+  const MOOD_PROFILES = {
+    happy:      { scale:"major",     tempo:128, octave:4, energy:0.8,  swing:0,   voicing:"open",  arpStyle:"up",    drumPattern:"pop" },
+    sad:        { scale:"minor",     tempo:76,  octave:3, energy:0.3,  swing:0.1, voicing:"close",  arpStyle:"down",  drumPattern:"ballad" },
+    romantic:   { scale:"major",     tempo:88,  octave:4, energy:0.5,  swing:0.15,voicing:"spread", arpStyle:"updown",drumPattern:"ballad" },
+    energetic:  { scale:"pentatonic",tempo:145, octave:4, energy:1.0,  swing:0,   voicing:"power",  arpStyle:"random",drumPattern:"drive" },
+    calm:       { scale:"pentatonic",tempo:68,  octave:4, energy:0.2,  swing:0.1, voicing:"open",   arpStyle:"up",    drumPattern:"none" },
+    melancholy: { scale:"minor",     tempo:72,  octave:3, energy:0.25, swing:0.15,voicing:"close",  arpStyle:"down",  drumPattern:"ballad" },
+    triumphant: { scale:"major",     tempo:140, octave:4, energy:0.9,  swing:0,   voicing:"power",  arpStyle:"up",    drumPattern:"drive" },
+    mysterious: { scale:"phrygian",  tempo:84,  octave:3, energy:0.4,  swing:0.2, voicing:"close",  arpStyle:"random",drumPattern:"sparse" },
+    devotional: { scale:"pentatonic",tempo:70,  octave:3, energy:0.3,  swing:0.1, voicing:"open",   arpStyle:"up",    drumPattern:"none" },
+    playful:    { scale:"mixolydian",tempo:132, octave:4, energy:0.75, swing:0.2, voicing:"open",   arpStyle:"updown",drumPattern:"pop" },
+    epic:       { scale:"harmonicMinor",tempo:96,octave:3,energy:0.85, swing:0,   voicing:"power",  arpStyle:"up",    drumPattern:"epic" },
+    nostalgia:  { scale:"pentatonic",tempo:86,  octave:4, energy:0.4,  swing:0.15,voicing:"spread", arpStyle:"down",  drumPattern:"ballad" },
+  };
+
+  // Drum patterns for composition
+  const COMP_DRUMS = {
+    pop:    { kick:[1,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0], snare:[0,0,0,0,1,0,0,0,0,0,0,0,1,0,0,0], hihat:[1,0,1,0,1,0,1,0,1,0,1,0,1,0,1,0] },
+    ballad: { kick:[1,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0], snare:[0,0,0,0,1,0,0,0,0,0,0,0,1,0,0,0], hihat:[0,0,1,0,0,0,1,0,0,0,1,0,0,0,1,0] },
+    drive:  { kick:[1,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0], snare:[0,0,0,0,1,0,0,1,0,0,0,0,1,0,0,0], hihat:[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1] },
+    epic:   { kick:[1,0,0,1,0,0,1,0,0,0,1,0,0,0,0,0], snare:[0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0], tom:[0,0,1,0,0,1,0,0,0,0,0,1,0,0,1,0] },
+    sparse: { kick:[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0], rim:[0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0], shaker:[0,0,0,0,1,0,0,0,0,0,0,0,1,0,0,0] },
+    none:   {},
+  };
+
+  let compositionTimer = null;
+  let compositionPlaying = false;
+  let compositionStartTime = 0;
+  let compositionDuration = 0;
+  let compositionNotes = []; // for piano roll
+
+  function generateComposition(mood, key, scaleChoice, tempo, bars) {
+    const profile = MOOD_PROFILES[mood] || MOOD_PROFILES.happy;
+    const scale = scaleChoice === "auto" ? profile.scale : scaleChoice;
+    const bpm = tempo || profile.tempo;
+    const beatDur = 60 / bpm;
+    const barDur = beatDur * 4;
+    const totalBars = bars || 16;
+    const totalTime = totalBars * barDur;
+
+    // Get chord progression
+    const progs = PROGRESSIONS[mood] || PROGRESSIONS.happy;
+    const prog = progs[Math.floor(Math.random() * progs.length)];
+    const chords = getDiatonicChords(key, scale);
+
+    // Get layer settings
+    const layers = {
+      chords: document.getElementById("layerChords")?.checked !== false,
+      melody: document.getElementById("layerMelody")?.checked !== false,
+      bass: document.getElementById("layerBass")?.checked !== false,
+      arp: document.getElementById("layerArp")?.checked !== false,
+      drums: document.getElementById("layerDrums")?.checked !== false,
+    };
+    const vols = {
+      chords: (parseInt(document.getElementById("volChords")?.value || 60)) / 100 * 0.3,
+      melody: (parseInt(document.getElementById("volMelody")?.value || 75)) / 100 * 0.35,
+      bass: (parseInt(document.getElementById("volBass")?.value || 55)) / 100 * 0.35,
+      arp: (parseInt(document.getElementById("volArp")?.value || 40)) / 100 * 0.2,
+      drums: (parseInt(document.getElementById("volDrums")?.value || 50)) / 100 * 0.8,
+    };
+
+    // Build structure
+    const structType = totalBars <= 8 ? "short" : totalBars <= 16 ? "short" : "medium";
+    const structure = STRUCTURES[structType];
+    const barsPerSection = Math.max(2, Math.floor(totalBars / structure.length));
+    const sections = structure.map((name, i) => ({
+      name,
+      startBar: i * barsPerSection,
+      bars: i === structure.length - 1 ? totalBars - i * barsPerSection : barsPerSection,
+    }));
+
+    const startTime = ctx.currentTime + 0.15;
+    compositionNotes = [];
+    compositionStartTime = startTime;
+    compositionDuration = totalTime;
+
+    // Generate each section
+    sections.forEach(section => {
+      const sectionStart = startTime + section.startBar * barDur;
+      const isIntro = section.name === "intro";
+      const isOutro = section.name === "outro";
+      const isChorus = section.name === "chorus";
+      const isBridge = section.name === "bridge";
+
+      // Intensity multiplier
+      const intensity = isIntro ? 0.5 : isOutro ? 0.4 : isChorus ? 1.2 : isBridge ? 0.7 : 1.0;
+
+      for (let bar = 0; bar < section.bars; bar++) {
+        const barStart = sectionStart + bar * barDur;
+        const chordIdx = prog[bar % prog.length] - 1;
+        const chord = chords[chordIdx % chords.length];
+        const rootMidi = noteToMidi(NOTES[chord.root], profile.octave);
+
+        // === CHORDS ===
+        if (layers.chords && !isIntro) {
+          const chordMidis = CHORD_TYPES[chord.quality].map(n => rootMidi + n);
+          chordMidis.forEach(midi => {
+            synthNote(midiToFreq(midi), barDur * 0.95, "pad", barStart, vols.chords * intensity, true);
+            compositionNotes.push({ midi, time: barStart - startTime, dur: barDur * 0.95, layer: "chord" });
+          });
+        }
+
+        // === BASS ===
+        if (layers.bass) {
+          const bassMidi = noteToMidi(NOTES[chord.root], 2);
+          // Bass pattern: root on 1 and 3
+          [0, 2].forEach(beat => {
+            if (isIntro && beat > 0) return;
+            const t = barStart + beat * beatDur;
+            synthNote(midiToFreq(bassMidi), beatDur * 0.8, "bass", t, vols.bass * intensity * (isOutro ? 0.5 : 1));
+            compositionNotes.push({ midi: bassMidi, time: t - startTime, dur: beatDur * 0.8, layer: "bass" });
+          });
+          // Walking bass on high energy
+          if (profile.energy > 0.6 && !isIntro && !isOutro) {
+            [1, 3].forEach(beat => {
+              const walkNote = bassMidi + [0, 2, 4, 5, 7][Math.floor(Math.random() * 5)];
+              const t = barStart + beat * beatDur;
+              synthNote(midiToFreq(walkNote), beatDur * 0.6, "bass", t, vols.bass * 0.6);
+              compositionNotes.push({ midi: walkNote, time: t - startTime, dur: beatDur * 0.6, layer: "bass" });
+            });
+          }
+        }
+
+        // === MELODY ===
+        if (layers.melody && !isIntro) {
+          const melodyScale = SCALES[scale] || SCALES.major;
+          const melOctave = profile.octave + 1;
+          const notesPerBar = profile.energy > 0.6 ? 6 : profile.energy > 0.3 ? 4 : 3;
+
+          // Create a motif in first bar, then develop it
+          let prevDeg = Math.floor(melodyScale.length / 2);
+          for (let n = 0; n < notesPerBar; n++) {
+            const beatPos = (n / notesPerBar) * 4;
+            const noteDur = beatDur * (4 / notesPerBar) * (0.6 + Math.random() * 0.3);
+
+            // Melodic movement
+            let step;
+            if (isChorus) {
+              step = Math.random() > 0.3 ? (Math.random() > 0.5 ? 1 : -1) : (Math.random() > 0.5 ? 2 : -2);
+            } else if (isBridge) {
+              step = Math.floor(Math.random() * 5) - 2;
+            } else {
+              step = Math.random() > 0.4 ? (Math.random() > 0.5 ? 1 : -1) : 0;
+            }
+
+            prevDeg = Math.max(0, Math.min(melodyScale.length * 2 - 1, prevDeg + step));
+            const octOffset = Math.floor(prevDeg / melodyScale.length);
+            const degInScale = prevDeg % melodyScale.length;
+            const melMidi = noteToMidi(key, melOctave + octOffset) + melodyScale[degInScale];
+
+            // Rest probability
+            if (Math.random() > profile.energy + 0.4) continue;
+            if (isOutro && n > notesPerBar / 2) continue;
+
+            const t = barStart + beatPos * beatDur;
+            synthNote(midiToFreq(melMidi), noteDur, "piano", t, vols.melody * intensity * 0.8, true);
+            compositionNotes.push({ midi: melMidi, time: t - startTime, dur: noteDur, layer: "melody" });
+          }
+        }
+
+        // === ARPEGGIO ===
+        if (layers.arp && isChorus) {
+          const arpMidis = CHORD_TYPES[chord.quality].map(n => rootMidi + 12 + n);
+          const arpPatterns = {
+            up: [0,1,2,0,1,2,0,1],
+            down: [2,1,0,2,1,0,2,1],
+            updown: [0,1,2,1,0,1,2,1],
+            random: Array.from({length:8}, () => Math.floor(Math.random() * 3)),
+          };
+          const pattern = arpPatterns[profile.arpStyle] || arpPatterns.up;
+          const arpBeatDiv = beatDur / 2;
+          pattern.forEach((idx, i) => {
+            if (i >= 8) return;
+            const t = barStart + i * arpBeatDiv;
+            const midi = arpMidis[idx % arpMidis.length];
+            synthNote(midiToFreq(midi), arpBeatDiv * 0.7, "arp", t, vols.arp * intensity);
+            compositionNotes.push({ midi, time: t - startTime, dur: arpBeatDiv * 0.7, layer: "arp" });
+          });
+        }
+
+        // === DRUMS ===
+        if (layers.drums && !isIntro) {
+          const dp = COMP_DRUMS[profile.drumPattern] || {};
+          Object.keys(dp).forEach(drum => {
+            dp[drum].forEach((hit, step) => {
+              if (!hit) return;
+              if (isOutro && step > 8) return;
+              const t = barStart + step * (beatDur / 4);
+              synthDrum(drum, t, vols.drums * intensity);
+            });
+          });
+        }
+      }
+    });
+
+    return { startTime, duration: totalTime, sections, tempo: bpm };
+  }
+
+  /* ================================================================
+     7. RAGA DATABASE (72 Melakartha + popular Janya ragas)
+     ================================================================ */
+  const SWARAS = { S:0, R1:1, R2:2, R3:3, G1:2, G2:3, G3:4, M1:5, M2:6, P:7, D1:8, D2:9, D3:10, N1:9, N2:10, N3:11 };
 
   const RAGAS = [
-    { name: "Shankarabharanam", aka: "Bilawal / Major Scale", mood: "joyful", time: "morning",
-      aroha: ["S","R2","G2","M1","P","D2","N2","S"], avaroha: ["S","N2","D2","P","M1","G2","R2","S"],
-      desc: "The foundation of Carnatic music. Equivalent to Western major scale." },
-    { name: "Kalyani", aka: "Yaman", mood: "devotional", time: "evening",
-      aroha: ["S","R2","G2","M2","P","D2","N2","S"], avaroha: ["S","N2","D2","P","M2","G2","R2","S"],
-      desc: "Auspicious and serene. One of the most popular ragas for devotional music." },
-    { name: "Kharaharapriya", aka: "Kafi", mood: "romantic", time: "night",
-      aroha: ["S","R2","G1","M1","P","D2","N1","S"], avaroha: ["S","N1","D2","P","M1","G1","R2","S"],
-      desc: "Versatile raga with deep emotional expression." },
-    { name: "Harikambhoji", aka: "Khamaj", mood: "joyful", time: "evening",
-      aroha: ["S","R2","G2","M1","P","D2","N1","S"], avaroha: ["S","N1","D2","P","M1","G2","R2","S"],
-      desc: "Bright and cheerful, often used in light classical and film music." },
-    { name: "Mayamalavagowla", aka: "Bhairav", mood: "devotional", time: "morning",
-      aroha: ["S","R1","G2","M1","P","D1","N2","S"], avaroha: ["S","N2","D1","P","M1","G2","R1","S"],
-      desc: "First raga taught to students. Sacred and foundational." },
-    { name: "Todi", aka: "Todi", mood: "melancholy", time: "morning",
-      aroha: ["S","R1","G1","M2","P","D1","N2","S"], avaroha: ["S","N2","D1","P","M2","G1","R1","S"],
-      desc: "Deep and contemplative, expresses longing and pathos." },
-    { name: "Bhairavi", aka: "Bhairavi", mood: "devotional", time: "morning",
-      aroha: ["S","R1","G1","M1","P","D1","N1","S"], avaroha: ["S","N1","D1","P","M1","G1","R1","S"],
-      desc: "Queen of ragas. Emotional depth, devotion, surrender." },
-    { name: "Mohanam", aka: "Bhoop", mood: "joyful", time: "evening",
-      aroha: ["S","R2","G2","P","D2","S"], avaroha: ["S","D2","P","G2","R2","S"],
-      desc: "Pentatonic raga full of sweetness and joy." },
-    { name: "Hamsadhwani", aka: "Hamsadhwani", mood: "joyful", time: "evening",
-      aroha: ["S","R2","G2","P","N2","S"], avaroha: ["S","N2","P","G2","R2","S"],
-      desc: "Auspicious pentatonic raga used to begin concerts." },
-    { name: "Hindolam", aka: "Malkauns", mood: "calm", time: "latenight",
-      aroha: ["S","G1","M1","D1","N1","S"], avaroha: ["S","N1","D1","M1","G1","S"],
-      desc: "Meditative and deep. Evokes stillness of late night." },
-    { name: "Kalyani (Shudh)", aka: "Pure Major #4", mood: "devotional", time: "evening",
-      aroha: ["S","R2","G2","M2","P","D2","N2","S"], avaroha: ["S","N2","D2","P","M2","G2","R2","S"],
-      desc: "Bright, auspicious, used for invoking blessings." },
-    { name: "Abhogi", aka: "Abhogi", mood: "romantic", time: "midday",
-      aroha: ["S","R2","G1","M1","D2","S"], avaroha: ["S","D2","M1","G1","R2","S"],
-      desc: "Sweet and compact pentatonic raga with romantic appeal." },
-    { name: "Revathi", aka: "Revathi", mood: "melancholy", time: "night",
-      aroha: ["S","R1","M1","P","N1","S"], avaroha: ["S","N1","P","M1","R1","S"],
-      desc: "Sparse and poignant, deep pathos and separation." },
-    { name: "Simhendramadhyamam", aka: "Simhendramadhyamam", mood: "heroic", time: "midday",
-      aroha: ["S","R2","G1","M2","P","D1","N2","S"], avaroha: ["S","N2","D1","P","M2","G1","R2","S"],
-      desc: "Grand and powerful, evoking courage and determination." },
-    { name: "Charukesi", aka: "Charukesi", mood: "romantic", time: "evening",
-      aroha: ["S","R2","G2","M1","P","D1","N1","S"], avaroha: ["S","N1","D1","P","M1","G2","R2","S"],
-      desc: "Western-influenced sound, widely used in film music." },
-    { name: "Bilahari", aka: "Bilahari", mood: "heroic", time: "morning",
-      aroha: ["S","R2","G2","P","D2","S"], avaroha: ["S","N2","D2","P","M1","G2","R2","S"],
-      desc: "Valor and brightness. Asymmetric ascending raga." },
-    { name: "Sahana", aka: "Sahana", mood: "romantic", time: "night",
-      aroha: ["S","R2","G2","M1","P","M1","D2","N2","S"], avaroha: ["S","N2","D2","P","M1","G2","R2","S"],
-      desc: "Tender and amorous, expresses longing and love." },
-    { name: "Anandabhairavi", aka: "Anandabhairavi", mood: "joyful", time: "morning",
-      aroha: ["S","G1","R2","G1","M1","P","D2","P","S"], avaroha: ["S","N1","D2","P","M1","G1","R2","S"],
-      desc: "Blissful and auspicious, popular in devotional music." },
-    { name: "Amritavarshini", aka: "Malhar", mood: "calm", time: "evening",
-      aroha: ["S","G2","M2","P","N2","S"], avaroha: ["S","N2","P","M2","G2","S"],
-      desc: "Rain raga. Said to invoke rainfall. Serene and mystical." },
-    { name: "Desh", aka: "Desh", mood: "romantic", time: "evening",
-      aroha: ["S","R2","M1","P","N2","S"], avaroha: ["S","N2","D2","P","M1","G2","R2","S"],
-      desc: "Patriotic and romantic. Popular in North Indian light music." },
-    { name: "Yaman Kalyan", aka: "Yaman", mood: "calm", time: "evening",
-      aroha: ["S","R2","G2","M2","P","D2","N2","S"], avaroha: ["S","N2","D2","P","M2","G2","R2","S"],
-      desc: "First raga taught in Hindustani music. Peaceful and devotional." },
-    { name: "Bageshree", aka: "Bageshree", mood: "romantic", time: "night",
-      aroha: ["S","G1","M1","D1","N1","S"], avaroha: ["S","N1","D1","M1","G1","R2","S"],
-      desc: "Night raga par excellence. Deep romantic longing." },
-    { name: "Durga", aka: "Durga", mood: "devotional", time: "night",
-      aroha: ["S","R2","M1","P","D2","S"], avaroha: ["S","D2","P","M1","R2","S"],
-      desc: "Named after the goddess. Simple and powerful." },
-    { name: "Kambhoji", aka: "Kambhoji", mood: "heroic", time: "evening",
-      aroha: ["S","R2","G2","M1","P","D2","S"], avaroha: ["S","N1","D2","P","M1","G2","R2","S"],
-      desc: "Majestic and heroic, one of the greatest ragas." },
+    // Melakartha Ragas (samplers)
+    { name:"Shankarabharanam", aka:"Bilawal/Dheerashankarabharanam", mood:"joyful", time:"morning", aroha:["S","R2","G3","M1","P","D2","N3","S"], avaroha:["S","N3","D2","P","M1","G3","R2","S"], desc:"72nd Melakarta. Foundation of Carnatic music, equivalent to Western major scale. Evokes brilliance and joy." },
+    { name:"Kalyani", aka:"Yaman (Hindustani)", mood:"devotional", time:"evening", aroha:["S","R2","G3","M2","P","D2","N3","S"], avaroha:["S","N3","D2","P","M2","G3","R2","S"], desc:"65th Melakarta. Auspicious and serene. One of India's most beloved ragas, used for devotional and concert openings." },
+    { name:"Kharaharapriya", aka:"Kafi (Hindustani)", mood:"romantic", time:"night", aroha:["S","R2","G2","M1","P","D2","N2","S"], avaroha:["S","N2","D2","P","M1","G2","R2","S"], desc:"22nd Melakarta. Versatile raga with deep emotional expression, widely used in film and classical music." },
+    { name:"Harikambhoji", aka:"Khamaj", mood:"joyful", time:"evening", aroha:["S","R2","G3","M1","P","D2","N2","S"], avaroha:["S","N2","D2","P","M1","G3","R2","S"], desc:"28th Melakarta. Bright and cheerful, often used in light classical and film music." },
+    { name:"Mayamalavagowla", aka:"Bhairav", mood:"devotional", time:"morning", aroha:["S","R1","G3","M1","P","D1","N3","S"], avaroha:["S","N3","D1","P","M1","G3","R1","S"], desc:"15th Melakarta. First raga taught to students. Sacred and foundational." },
+    { name:"Todi (Shubhapantuvarali)", aka:"Todi", mood:"melancholy", time:"morning", aroha:["S","R1","G2","M2","P","D1","N3","S"], avaroha:["S","N3","D1","P","M2","G2","R1","S"], desc:"45th Melakarta. Deep and contemplative, expresses longing, pathos, and introspective beauty." },
+    { name:"Bhairavi (Hanumathodi)", aka:"Bhairavi", mood:"devotional", time:"morning", aroha:["S","R1","G2","M1","P","D1","N2","S"], avaroha:["S","N2","D1","P","M1","G2","R1","S"], desc:"8th Melakarta. Queen of ragas. Emotional depth, devotion, and often used as the final raga in concerts." },
+    { name:"Natabhairavi", aka:"Asavari", mood:"melancholy", time:"midday", aroha:["S","R2","G2","M1","P","D1","N2","S"], avaroha:["S","N2","D1","P","M1","G2","R2","S"], desc:"20th Melakarta. Equivalent to natural minor scale. Evokes sadness and contemplation." },
+    { name:"Dheerashankarabharanam", aka:"Bilawal", mood:"joyful", time:"morning", aroha:["S","R2","G3","M1","P","D2","N3","S"], avaroha:["S","N3","D2","P","M1","G3","R2","S"], desc:"29th Melakarta. Same as Western major. The most fundamental scale in world music." },
+    { name:"Mechakalyani", aka:"Kalyani/Yaman", mood:"devotional", time:"evening", aroha:["S","R2","G3","M2","P","D2","N3","S"], avaroha:["S","N3","D2","P","M2","G3","R2","S"], desc:"65th Melakarta. Sublime and devotional, a pillar of both Carnatic and Hindustani traditions." },
+    { name:"Hanumatodi", aka:"Bhairavi", mood:"devotional", time:"morning", aroha:["S","R1","G2","M1","P","D1","N2","S"], avaroha:["S","N2","D1","P","M1","G2","R1","S"], desc:"8th Melakarta. The complete Todi scale. Deep emotional weight for devotional and classical performance." },
+    { name:"Simhendramadhyamam", aka:"Simhendramadhyamam", mood:"heroic", time:"midday", aroha:["S","R2","G2","M2","P","D1","N3","S"], avaroha:["S","N3","D1","P","M2","G2","R2","S"], desc:"57th Melakarta. Grand and powerful, evoking courage, determination, and majesty." },
+    { name:"Hemavathi", aka:"Hemavathi", mood:"calm", time:"evening", aroha:["S","R2","G2","M2","P","D2","N2","S"], avaroha:["S","N2","D2","P","M2","G2","R2","S"], desc:"58th Melakarta. Meditative and calm, with a unique flavor from prati madhyamam." },
+    { name:"Dharmavathi", aka:"Dharmavathi", mood:"calm", time:"night", aroha:["S","R2","G2","M2","P","D2","N3","S"], avaroha:["S","N3","D2","P","M2","G2","R2","S"], desc:"59th Melakarta. Haunting beauty. Peaceful yet emotionally deep." },
+    { name:"Charukesi", aka:"Charukesi", mood:"romantic", time:"evening", aroha:["S","R2","G3","M1","P","D1","N2","S"], avaroha:["S","N2","D1","P","M1","G3","R2","S"], desc:"26th Melakarta. Western-influenced sound, widely used in film music for romantic themes." },
+    { name:"Vakulabharanam", aka:"Vakulabharanam", mood:"devotional", time:"morning", aroha:["S","R1","G3","M1","P","D1","N2","S"], avaroha:["S","N2","D1","P","M1","G3","R1","S"], desc:"14th Melakarta. Devotional and unique, used extensively in krithis by Tyagaraja." },
+    { name:"Chakravakam", aka:"Ahir Bhairav", mood:"devotional", time:"morning", aroha:["S","R1","G3","M1","P","D2","N3","S"], avaroha:["S","N3","D2","P","M1","G3","R1","S"], desc:"16th Melakarta. Morning devotional raga with a distinctive Middle Eastern flavor." },
+    { name:"Vachaspathi", aka:"Vachaspathi", mood:"joyful", time:"evening", aroha:["S","R2","G3","M2","P","D2","N2","S"], avaroha:["S","N2","D2","P","M2","G3","R2","S"], desc:"64th Melakarta. Bright with prati madhyamam giving it a majestic, uplifting character." },
+    { name:"Ramapriya", aka:"Ramapriya", mood:"romantic", time:"night", aroha:["S","R1","G3","M2","P","D2","N3","S"], avaroha:["S","N3","D2","P","M2","G3","R1","S"], desc:"52nd Melakarta. Romantic and haunting with its unique combination of shuddha rishabham and prati madhyamam." },
+    { name:"Shanmukhapriya", aka:"Shanmukhapriya", mood:"heroic", time:"midday", aroha:["S","R2","G2","M2","P","D1","N2","S"], avaroha:["S","N2","D1","P","M2","G2","R2","S"], desc:"56th Melakarta. Popular in film music for dramatic, powerful themes." },
+    // Popular Janya (derived) Ragas
+    { name:"Mohanam", aka:"Bhoop/Bhopali", mood:"joyful", time:"evening", aroha:["S","R2","G3","P","D2","S"], avaroha:["S","D2","P","G3","R2","S"], desc:"Janya of Harikambhoji. Pentatonic raga full of sweetness and joy. Universally loved." },
+    { name:"Hamsadhwani", aka:"Hamsadhwani", mood:"joyful", time:"evening", aroha:["S","R2","G3","P","N3","S"], avaroha:["S","N3","P","G3","R2","S"], desc:"Janya of Shankarabharanam. Auspicious pentatonic raga, traditionally used to begin concerts." },
+    { name:"Hindolam", aka:"Malkauns", mood:"calm", time:"latenight", aroha:["S","G2","M1","D1","N2","S"], avaroha:["S","N2","D1","M1","G2","S"], desc:"Janya of Natabhairavi. Meditative and deep. Evokes stillness and the transcendence of late night." },
+    { name:"Abhogi", aka:"Abhogi", mood:"romantic", time:"midday", aroha:["S","R2","G2","M1","D2","S"], avaroha:["S","D2","M1","G2","R2","S"], desc:"Janya of Kharaharapriya. Sweet and compact pentatonic raga with intimate romantic appeal." },
+    { name:"Revathi", aka:"Revathi", mood:"melancholy", time:"night", aroha:["S","R1","M1","P","N2","S"], avaroha:["S","N2","P","M1","R1","S"], desc:"Sparse and poignant. Deep pathos and separation. A raga of longing and solitude." },
+    { name:"Bilahari", aka:"Bilahari", mood:"heroic", time:"morning", aroha:["S","R2","G3","P","D2","S"], avaroha:["S","N3","D2","P","M1","G3","R2","S"], desc:"Janya of Shankarabharanam. Valor and brightness. Asymmetric ascending gives it a distinctive brilliance." },
+    { name:"Sahana", aka:"Sahana", mood:"romantic", time:"night", aroha:["S","R2","G3","M1","P","M1","D2","N3","S"], avaroha:["S","N3","D2","P","M1","G3","R2","S"], desc:"Janya of Harikambhoji. Tender and amorous, expresses longing, romance and love." },
+    { name:"Anandabhairavi", aka:"Anandabhairavi", mood:"joyful", time:"morning", aroha:["S","G2","R2","G2","M1","P","D2","P","S"], avaroha:["S","N2","D2","P","M1","G2","R2","S"], desc:"Janya of Natabhairavi. Blissful and auspicious, immensely popular in devotional and wedding music." },
+    { name:"Amritavarshini", aka:"Malhar", mood:"calm", time:"evening", aroha:["S","G3","M2","P","N3","S"], avaroha:["S","N3","P","M2","G3","S"], desc:"The rainmaker raga. Said to invoke rainfall. Serene, mystical, and full of wonder." },
+    { name:"Desh", aka:"Desh", mood:"romantic", time:"evening", aroha:["S","R2","M1","P","N3","S"], avaroha:["S","N3","D2","P","M1","G3","R2","S"], desc:"Patriotic and romantic. Immensely popular in North Indian light classical and film music." },
+    { name:"Yaman", aka:"Kalyani", mood:"calm", time:"evening", aroha:["S","R2","G3","M2","P","D2","N3","S"], avaroha:["S","N3","D2","P","M2","G3","R2","S"], desc:"First raga taught in Hindustani music. Peaceful, devotional, and universally beloved." },
+    { name:"Bageshree", aka:"Bageshree", mood:"romantic", time:"night", aroha:["S","G2","M1","D1","N2","S"], avaroha:["S","N2","D1","M1","G2","R2","S"], desc:"Night raga par excellence. Deep romantic longing and emotional intimacy." },
+    { name:"Durga", aka:"Durga", mood:"devotional", time:"night", aroha:["S","R2","M1","P","D2","S"], avaroha:["S","D2","P","M1","R2","S"], desc:"Named after goddess Durga. Simple, powerful, and profound in its devotional character." },
+    { name:"Kambhoji", aka:"Kambhoji", mood:"heroic", time:"evening", aroha:["S","R2","G3","M1","P","D2","S"], avaroha:["S","N2","D2","P","M1","G3","R2","S"], desc:"One of the greatest ragas. Majestic, heroic, used extensively by all great composers." },
+    { name:"Karaharapriya", aka:"Kafi", mood:"romantic", time:"night", aroha:["S","R2","G2","M1","P","D2","N2","S"], avaroha:["S","N2","D2","P","M1","G2","R2","S"], desc:"One of the most versatile ragas. Romantic, expressive, and perpetually popular in film music." },
+    { name:"Thodi", aka:"Todi", mood:"melancholy", time:"morning", aroha:["S","R1","G2","M2","P","D1","N3","S"], avaroha:["S","N3","D1","P","M2","G2","R1","S"], desc:"Highly ornamented and emotionally intense. Quintessential morning raga for deep expression." },
+    { name:"Keeravani", aka:"Yaman Kalyan", mood:"romantic", time:"night", aroha:["S","R2","G2","M1","P","D1","N3","S"], avaroha:["S","N3","D1","P","M1","G2","R2","S"], desc:"21st Melakarta. Hauntingly beautiful, made famous by the song 'Roja' composed by A.R. Rahman." },
+    { name:"Madhyamavathi", aka:"Madhyamavathi", mood:"devotional", time:"latenight", aroha:["S","R2","M1","P","N2","S"], avaroha:["S","N2","P","M1","R2","S"], desc:"Pentatonic raga of deep devotion. Often the closing raga in concerts. Pure and transcendent." },
+    { name:"Sri Raga", aka:"Sri", mood:"devotional", time:"evening", aroha:["S","R2","M1","P","N3","S"], avaroha:["S","N3","P","D2","N3","P","M1","R2","G3","R2","S"], desc:"Exalted and auspicious. Complex phrasing makes it a raga for advanced musicians." },
+    { name:"Panthuvarali", aka:"Purvi", mood:"melancholy", time:"evening", aroha:["S","R1","G3","M2","P","D1","N3","S"], avaroha:["S","N3","D1","P","M2","G3","R1","S"], desc:"51st Melakarta. Intense and dramatic. Creates an atmosphere of grandeur and deep emotion." },
+    { name:"Kaanada", aka:"Darbari Kanada", mood:"heroic", time:"night", aroha:["S","R2","G2","M1","P","D2","N2","S"], avaroha:["S","N2","D2","P","M1","G2","R2","S"], desc:"Majestic night raga. The 'royal' raga, associated with Mughal courts and grandeur." },
+    { name:"Bhimpalasi", aka:"Bhimpalasi", mood:"romantic", time:"midday", aroha:["S","G2","M1","P","N2","S"], avaroha:["S","N2","D2","P","M1","G2","R2","S"], desc:"Afternoon raga of romantic longing. Sweet, simple, and deeply emotive." },
+    { name:"Marwa", aka:"Marwa", mood:"calm", time:"evening", aroha:["S","R1","G3","M2","D2","N3","S"], avaroha:["S","N3","D2","M2","G3","R1","S"], desc:"Twilight raga without Pa. Creates an ethereal, suspended atmosphere of contemplation." },
+    { name:"Poorvi", aka:"Poorvi", mood:"melancholy", time:"evening", aroha:["S","R1","G3","M2","P","D1","N3","S"], avaroha:["S","N3","D1","P","M2","G3","R1","S"], desc:"Sunset raga of deep gravity. Meditative and introspective with vivadi swaras." },
+    { name:"Kedar", aka:"Kedar", mood:"devotional", time:"night", aroha:["S","M1","M1","P","D2","M1","P","G3","M1","R2","S"], avaroha:["S","N3","D2","P","M1","G3","R2","S"], desc:"Devotional night raga dedicated to Lord Shiva. Vakra phrases create a meditative quality." },
+    { name:"Tilak Kamod", aka:"Tilak Kamod", mood:"joyful", time:"night", aroha:["S","R2","G3","P","N3","S"], avaroha:["S","N3","D2","P","G3","M1","R2","S"], desc:"Elegant and joyful night raga. Sweet and uplifting, popular in semi-classical music." },
+    { name:"Brindavana Saranga", aka:"Brindavana Saranga", mood:"romantic", time:"midday", aroha:["S","R2","M1","P","N3","S"], avaroha:["S","N3","P","M1","R2","S"], desc:"Pentatonic raga evocative of Lord Krishna in Brindavan. Sweet, romantic, and devotional." },
+    { name:"Vasantha", aka:"Vasantha", mood:"romantic", time:"evening", aroha:["S","M1","G3","M1","D1","N3","S"], avaroha:["S","N3","D1","M1","G3","R1","S"], desc:"Raga of spring. Romantic and celebratory. Vakra phrases add ornamental beauty." },
+    { name:"Surutti", aka:"Surutti", mood:"devotional", time:"morning", aroha:["S","R2","M1","P","D2","N2","S"], avaroha:["S","N2","D2","P","M1","R2","S"], desc:"Bright devotional raga. Popular in Tyagaraja kritis and wedding nadhaswaram music." },
+    { name:"Nattai", aka:"Nattai", mood:"heroic", time:"morning", aroha:["S","R2","G3","M1","P","D2","N3","S"], avaroha:["S","N3","P","M1","G3","M1","R2","S"], desc:"Grand and heroic. The traditional opening raga for concerts, used in 'Nattai Kurinji' invocations." },
+    { name:"Gaula", aka:"Gaula", mood:"devotional", time:"morning", aroha:["S","R1","G3","M1","P","D1","S"], avaroha:["S","N3","D1","P","M1","G3","R1","S"], desc:"Ancient and devotional. The raga of saint Tyagaraja's most famous kriti 'Nagumomu Ganaleni'." },
+    { name:"Arabhi", aka:"Arabhi", mood:"joyful", time:"morning", aroha:["S","R2","M1","P","D2","S"], avaroha:["S","N3","D2","P","M1","G3","R2","S"], desc:"Joyful janya of Shankarabharanam. Popular for morning and auspicious occasions." },
+    { name:"Atana", aka:"Atana", mood:"heroic", time:"night", aroha:["S","R2","M1","P","D2","S"], avaroha:["S","N2","D2","P","M1","G3","R2","S"], desc:"Powerful and heroic. Intense phrases used for expressing valor and grandeur." },
+    { name:"Saveri", aka:"Saveri", mood:"melancholy", time:"evening", aroha:["S","R1","M1","P","D1","S"], avaroha:["S","N3","D1","P","M1","G3","R1","S"], desc:"Raga of sorrow and devotion. Sparse scale creates a haunting, vulnerable character." },
+    { name:"Kedaram", aka:"Kedar", mood:"devotional", time:"night", aroha:["S","R2","G3","M1","P","D2","N3","S"], avaroha:["S","N3","D2","P","M1","G3","R2","S"], desc:"Night raga of spiritual contemplation and devotional serenity." },
+    { name:"Behag", aka:"Behag", mood:"romantic", time:"night", aroha:["S","G3","M1","P","N3","S"], avaroha:["S","N3","D2","P","M1","G3","M1","R2","S"], desc:"Beloved night raga of romance. Sweet, flowing melodies that capture the essence of love." },
+    { name:"Nilambari", aka:"Nilambari", mood:"calm", time:"latenight", aroha:["S","R2","G3","M1","P","D2","N3","S"], avaroha:["S","N3","D2","P","M1","G3","R2","S"], desc:"The lullaby raga. Incredibly soothing and calming. Used to put children to sleep." },
+    { name:"Shanmukhapriya Janya", aka:"Latangi", mood:"heroic", time:"midday", aroha:["S","R2","G3","M2","P","D1","N3","S"], avaroha:["S","N3","D1","P","M2","G3","R2","S"], desc:"63rd Melakarta. Energetic and dramatic with a unique flavor from its vivadi combination." },
+    { name:"Hamsanandi", aka:"Sohni", mood:"romantic", time:"latenight", aroha:["S","R2","G3","M2","D2","N3","S"], avaroha:["S","N3","D2","M2","G3","R2","S"], desc:"Pa-less raga of late night. Ethereal and deeply romantic with a suspended quality." },
+    { name:"Malkauns", aka:"Hindolam", mood:"calm", time:"latenight", aroha:["S","G2","M1","D1","N2","S"], avaroha:["S","N2","D1","M1","G2","S"], desc:"Midnight pentatonic raga. One of the most powerful ragas for meditation and late night performance." },
+    { name:"Bhoopalam", aka:"Bhoop", mood:"joyful", time:"morning", aroha:["S","R2","G3","P","D2","S"], avaroha:["S","D2","P","G3","R2","S"], desc:"Morning raga of joy. Universally pleasing pentatonic scale found in music worldwide." },
+    { name:"Madhuvanthi", aka:"Madhuvanthi", mood:"romantic", time:"evening", aroha:["S","R2","G3","M2","P","N3","S"], avaroha:["S","N3","P","M2","G3","R2","S"], desc:"Pa-ascending only raga of romantic beauty. Popularized immensely by film music." },
+    { name:"Kapi", aka:"Kapi", mood:"romantic", time:"midday", aroha:["S","R2","G2","M1","P","D2","N3","S"], avaroha:["S","N2","D2","P","M1","G3","R2","S"], desc:"Mishra raga with dual gandharam and nishadam. One of the most popular ragas in film music." },
+    { name:"Khamas", aka:"Khamas", mood:"joyful", time:"night", aroha:["S","G3","M1","P","D2","N2","S"], avaroha:["S","N2","D2","P","M1","G3","R2","S"], desc:"Night raga of joy and celebration. Popular for lighter, festive compositions." },
+    { name:"Darbari Kanada", aka:"Darbari", mood:"heroic", time:"night", aroha:["S","R2","G2","M1","P","D1","N2","S"], avaroha:["S","N2","D1","N2","P","M1","P","G2","M1","R2","S"], desc:"Emperor of night ragas. Deep oscillations (andolan) on Ga and Dha create an unmatched majesty." },
+    { name:"Puriya Dhanashri", aka:"Puriya Dhanashri", mood:"calm", time:"evening", aroha:["S","R1","G3","M2","P","D1","N3","S"], avaroha:["S","N3","D1","P","M2","G3","R1","S"], desc:"Evening raga of deep introspection. Combines the gravitas of Puriya with Dhanashri's sweetness." },
+    { name:"Jaunpuri", aka:"Jaunpuri", mood:"calm", time:"midday", aroha:["S","R2","G2","M1","P","D2","N2","S"], avaroha:["S","N2","D2","P","M1","G2","R2","S"], desc:"Named after the city of Jaunpur. Calm, serene, and often used for contemplative ragas in the afternoon." },
+    { name:"Lalitha", aka:"Lalitha", mood:"romantic", time:"evening", aroha:["S","R1","G3","M2","D1","N3","S"], avaroha:["S","N3","D1","M2","G3","R1","S"], desc:"Evening raga without Pa. Delicate and romantic, creating an atmosphere of elegant beauty." },
+    { name:"Nalinakanthi", aka:"Nalinakanthi", mood:"romantic", time:"night", aroha:["S","G3","R2","G3","M1","P","D2","N3","S"], avaroha:["S","N3","D2","P","M1","G3","R2","S"], desc:"Enchanting night raga with vakra phrases. Sweet and romantic with ornamental beauty." },
+    { name:"Mukhari", aka:"Mukhari", mood:"melancholy", time:"evening", aroha:["S","R2","G2","M1","P","D1","N2","S"], avaroha:["S","N2","D1","P","M1","G2","R2","S"], desc:"Ancient raga of deep sorrow. Gravitas and emotional weight make it ideal for classical expression." },
   ];
 
-  function swaraToSemitone(swara) { return SWARAS[swara] ?? 0; }
+  function swaraToSemitone(sw) { return SWARAS[sw] ?? 0; }
 
-  function ragaNotesToFreqs(swaras, baseFreq) {
-    return swaras.map(s => {
-      let st = swaraToSemitone(s);
-      if (s === "S" && swaras.indexOf(s) === swaras.length - 1) st = 12;
+  function ragaToFreqs(swaras, baseFreq) {
+    let prevSemitone = -1;
+    return swaras.map((sw, i) => {
+      let st = swaraToSemitone(sw);
+      if (i > 0 && st <= prevSemitone && i === swaras.length - 1) st += 12;
+      if (i > 0 && st < prevSemitone && swaras[0] === "S") {
+        // Check if descending
+        const isDesc = swaraToSemitone(swaras[1]) > swaraToSemitone(swaras[Math.min(2, swaras.length-1)]);
+        if (!isDesc && st <= prevSemitone) st += 12;
+      }
+      prevSemitone = st;
       return baseFreq * Math.pow(2, st / 12);
     });
   }
 
-  // ======================== BEAT PATTERNS ========================
-  const DRUM_ROWS = ["kick", "snare", "hihat", "openhat", "clap", "tom", "rim", "shaker"];
-  const DRUM_LABELS = { kick: "Kick", snare: "Snare", hihat: "Hi-Hat", openhat: "Open Hat", clap: "Clap", tom: "Tom", rim: "Rim", shaker: "Shaker" };
-
-  const BEAT_PRESETS = {
-    rock: {
-      kick:   [1,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0],
-      snare:  [0,0,0,0,1,0,0,0,0,0,0,0,1,0,0,0],
-      hihat:  [1,0,1,0,1,0,1,0,1,0,1,0,1,0,1,0],
-    },
-    hiphop: {
-      kick:   [1,0,0,1,0,0,1,0,0,0,1,0,0,0,0,0],
-      snare:  [0,0,0,0,1,0,0,0,0,0,0,0,1,0,0,0],
-      hihat:  [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
-      openhat:[0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0],
-    },
-    jazz: {
-      kick:   [1,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0],
-      snare:  [0,0,0,0,1,0,0,0,0,0,0,0,1,0,0,0],
-      hihat:  [1,0,1,1,0,1,1,0,1,1,0,1,1,0,1,0],
-      rim:    [0,0,0,1,0,0,0,0,0,0,0,1,0,0,0,0],
-    },
-    latin: {
-      kick:   [1,0,0,1,0,0,1,0,0,1,0,0,1,0,0,0],
-      clap:   [0,0,0,0,1,0,0,1,0,0,0,0,1,0,0,1],
-      shaker: [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
-      tom:    [0,0,1,0,0,0,1,0,0,0,1,0,0,1,0,0],
-    },
-    edm: {
-      kick:   [1,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0],
-      clap:   [0,0,0,0,1,0,0,0,0,0,0,0,1,0,0,0],
-      hihat:  [0,0,1,0,0,0,1,0,0,0,1,0,0,0,1,0],
-      openhat:[0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,1],
-    },
-    bollywood: {
-      kick:   [1,0,0,1,0,0,1,0,1,0,0,1,0,0,1,0],
-      snare:  [0,0,0,0,1,0,0,0,0,0,0,0,1,0,0,0],
-      hihat:  [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
-      tom:    [0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,1],
-    },
-    classical: {
-      kick:   [1,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0],
-      tom:    [0,0,1,0,0,1,0,0,0,0,1,0,0,1,0,0],
-      shaker: [1,0,1,0,1,0,1,0,1,0,1,0,1,0,1,0],
-    },
+  /* ================================================================
+     8. BEAT MAKER ENGINE
+     ================================================================ */
+  const DRUM_ROWS = ["kick","snare","hihat","openhat","clap","tom","rim","shaker"];
+  const DRUM_LABELS = {
+    kick:"Kick", snare:"Snare", hihat:"Hi-Hat", openhat:"Open Hat",
+    clap:"Clap", tom:"Tom", rim:"Rim Shot", shaker:"Shaker"
+  };
+  const DRUM_COLORS = {
+    kick:"var(--accent)", snare:"var(--pink)", hihat:"var(--cyan)", openhat:"var(--green)",
+    clap:"var(--orange)", tom:"var(--red)", rim:"var(--blue)", shaker:"#f472b6"
   };
 
-  // ======================== STATE ========================
-  let currentTab = "mood";
-  let selectedMood = null;
-  let moodPlaying = false;
-  let moodTimeout = null;
+  const BEAT_PRESETS = {
+    rock:      { kick:[1,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0], snare:[0,0,0,0,1,0,0,0,0,0,0,0,1,0,0,0], hihat:[1,0,1,0,1,0,1,0,1,0,1,0,1,0,1,0] },
+    hiphop:    { kick:[1,0,0,1,0,0,1,0,0,0,1,0,0,0,0,0], snare:[0,0,0,0,1,0,0,0,0,0,0,0,1,0,0,0], hihat:[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1], openhat:[0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0] },
+    jazz:      { kick:[1,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0], snare:[0,0,0,0,1,0,0,0,0,0,0,0,1,0,0,0], hihat:[1,0,1,1,0,1,1,0,1,1,0,1,1,0,1,0], rim:[0,0,0,1,0,0,0,0,0,0,0,1,0,0,0,0] },
+    latin:     { kick:[1,0,0,1,0,0,1,0,0,1,0,0,1,0,0,0], clap:[0,0,0,0,1,0,0,1,0,0,0,0,1,0,0,1], shaker:[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1], tom:[0,0,1,0,0,0,1,0,0,0,1,0,0,1,0,0] },
+    edm:       { kick:[1,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0], clap:[0,0,0,0,1,0,0,0,0,0,0,0,1,0,0,0], hihat:[0,0,1,0,0,0,1,0,0,0,1,0,0,0,1,0], openhat:[0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,1] },
+    dnb:       { kick:[1,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0], snare:[0,0,0,0,1,0,0,0,0,0,0,0,0,0,1,0], hihat:[1,0,1,0,1,0,1,0,1,0,1,0,1,0,1,0], rim:[0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,1] },
+    funk:      { kick:[1,0,0,1,0,0,1,0,0,0,1,0,0,1,0,0], snare:[0,0,0,0,1,0,0,0,0,0,0,0,1,0,0,1], hihat:[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1], openhat:[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1] },
+    bollywood: { kick:[1,0,0,1,0,0,1,0,1,0,0,1,0,0,1,0], snare:[0,0,0,0,1,0,0,0,0,0,0,0,1,0,0,0], hihat:[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1], tom:[0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,1] },
+    classical: { kick:[1,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0], tom:[0,0,1,0,0,1,0,0,0,0,1,0,0,1,0,0], shaker:[1,0,1,0,1,0,1,0,1,0,1,0,1,0,1,0] },
+  };
+
+  const STEPS = 16;
+  let beatGrid = {};
+  let beatVolumes = {};
   let beatPlaying = false;
   let beatInterval = null;
   let beatStep = 0;
-  let beatGrid = {};
+
+  /* ================================================================
+     9. STATE
+     ================================================================ */
+  let currentTab = "mood";
+  let selectedMood = null;
+  let selectedRaga = null;
   let ragaPlaying = false;
   let ragaTimeouts = [];
-  const STEPS = 16;
 
-  // ======================== TAB NAVIGATION ========================
+  /* ================================================================
+     10. UI CONTROLLERS
+     ================================================================ */
+  function esc(str) {
+    const d = document.createElement("div");
+    d.textContent = str;
+    return d.innerHTML;
+  }
+
+  // --- NAV ---
+  function initNav() {
+    const toggle = document.getElementById("navToggle");
+    const navLinks = document.getElementById("navLinks");
+    if (toggle && navLinks) {
+      toggle.addEventListener("click", () => navLinks.classList.toggle("open"));
+      navLinks.querySelectorAll("a").forEach(a =>
+        a.addEventListener("click", () => navLinks.classList.remove("open"))
+      );
+    }
+  }
+
+  // --- TABS ---
   function initTabs() {
-    const links = document.querySelectorAll(".nav-links a[data-tab]");
-    links.forEach(link => {
+    document.querySelectorAll(".nav-links a[data-tab]").forEach(link => {
       link.addEventListener("click", (e) => {
         e.preventDefault();
-        const tab = link.dataset.tab;
-        switchTab(tab);
+        switchTab(link.dataset.tab);
       });
     });
     switchTab("mood");
@@ -548,129 +820,269 @@
     document.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("active"));
     const panel = document.getElementById("tab-" + tab);
     if (panel) panel.classList.add("active");
-    document.querySelectorAll(".nav-links a[data-tab]").forEach(a => {
-      a.classList.toggle("active", a.dataset.tab === tab);
-    });
+    document.querySelectorAll(".nav-links a[data-tab]").forEach(a =>
+      a.classList.toggle("active", a.dataset.tab === tab)
+    );
   }
 
-  // ======================== HERO VISUALIZER ========================
-  function initHeroVisualizer() {
+  // --- HERO VISUALIZER ---
+  function initHeroViz() {
     const container = document.getElementById("heroVisualizer");
     if (!container) return;
-    const barCount = 40;
-    for (let i = 0; i < barCount; i++) {
+    for (let i = 0; i < 48; i++) {
       const bar = document.createElement("div");
       bar.className = "hero-bar";
-      bar.style.height = "10px";
+      bar.style.height = "8px";
       container.appendChild(bar);
     }
-    animateHeroBars(container);
-  }
-
-  function animateHeroBars(container) {
     const bars = container.querySelectorAll(".hero-bar");
-    function update() {
+    (function animate() {
       bars.forEach((bar, i) => {
-        const h = 10 + Math.sin(Date.now() / 300 + i * 0.5) * 25 + Math.random() * 15;
+        const h = 6 + Math.sin(Date.now() / 400 + i * 0.4) * 20 + Math.sin(Date.now() / 700 + i * 0.2) * 10 + Math.random() * 5;
         bar.style.height = h + "px";
       });
-      requestAnimationFrame(update);
-    }
-    update();
+      requestAnimationFrame(animate);
+    })();
   }
 
-  // ======================== MOOD COMPOSER ========================
+  // --- MOOD COMPOSER UI ---
   function initMoodComposer() {
     const grid = document.getElementById("moodGrid");
-    if (!grid) return;
-
     grid.addEventListener("click", (e) => {
       const card = e.target.closest(".mood-card");
       if (!card) return;
       document.querySelectorAll(".mood-card").forEach(c => c.classList.remove("selected"));
       card.classList.add("selected");
       selectedMood = card.dataset.mood;
-
-      // Auto-set recommended scale/tempo
       const profile = MOOD_PROFILES[selectedMood];
       if (profile) {
         document.getElementById("moodTempo").value = profile.tempo;
         document.getElementById("moodTempoVal").textContent = profile.tempo + " BPM";
-        document.getElementById("moodScale").value = profile.scale;
+        if (document.getElementById("moodScale").value === "auto") {
+          // Keep auto
+        }
       }
     });
 
-    // Tempo slider
-    const tempoSlider = document.getElementById("moodTempo");
-    tempoSlider.addEventListener("input", () => {
-      document.getElementById("moodTempoVal").textContent = tempoSlider.value + " BPM";
+    document.getElementById("moodTempo").addEventListener("input", (e) => {
+      document.getElementById("moodTempoVal").textContent = e.target.value + " BPM";
     });
 
-    // Generate
     document.getElementById("moodGenerate").addEventListener("click", () => {
-      if (!selectedMood) {
-        alert("Please select a mood first!");
-        return;
-      }
+      if (!selectedMood) { alert("Please select a mood first!"); return; }
       initAudio();
+      stopComposition();
+      compositionPlaying = true;
+      document.getElementById("moodStop").disabled = false;
+      document.getElementById("moodGenerate").classList.remove("pulse-ready");
+      document.getElementById("moodVizArea").style.display = "block";
+
       const key = document.getElementById("moodKey").value;
       const scale = document.getElementById("moodScale").value;
-      const tempo = parseInt(tempoSlider.value);
+      const tempo = parseInt(document.getElementById("moodTempo").value);
       const bars = parseInt(document.getElementById("moodDuration").value);
-      playMoodMelody(selectedMood, key, scale, tempo, bars);
+
+      const result = generateComposition(selectedMood, key, scale, tempo, bars);
+
+      // Show structure
+      const structEl = document.getElementById("moodStructure");
+      structEl.innerHTML = result.sections.map(s =>
+        `<div class="structure-block ${s.name}" data-start="${s.startBar}">${s.name}</div>`
+      ).join("");
+
+      // Transport
+      document.getElementById("moodDetail").textContent =
+        `${selectedMood.charAt(0).toUpperCase() + selectedMood.slice(1)} · ${key} · ${tempo} BPM · ${bars} bars`;
+      document.getElementById("moodStatus").textContent = "Playing";
+
+      // Start visualizers
+      startPianoRollViz();
+      startWaveformViz(document.getElementById("moodWaveform"));
+
+      // Progress timer
+      const startMs = Date.now();
+      const totalMs = result.duration * 1000;
+      compositionTimer = setInterval(() => {
+        const elapsed = Date.now() - startMs;
+        const pct = Math.min(100, (elapsed / totalMs) * 100);
+        document.getElementById("moodProgress").style.width = pct + "%";
+        const elSec = Math.floor(elapsed / 1000);
+        const totSec = Math.floor(totalMs / 1000);
+        document.getElementById("moodTime").textContent =
+          `${Math.floor(elSec/60)}:${(elSec%60).toString().padStart(2,"0")} / ${Math.floor(totSec/60)}:${(totSec%60).toString().padStart(2,"0")}`;
+
+        // Highlight active structure block
+        const currentBar = Math.floor((elapsed / 1000) / (60 / tempo) / 4);
+        document.querySelectorAll(".structure-block").forEach(b => {
+          const bStart = parseInt(b.dataset.start);
+          b.classList.toggle("active", currentBar >= bStart);
+        });
+
+        if (elapsed >= totalMs) {
+          stopComposition();
+          document.getElementById("moodStatus").textContent = "Complete";
+        }
+      }, 100);
     });
 
-    // Stop
-    document.getElementById("moodStop").addEventListener("click", stopMoodMelody);
+    document.getElementById("moodStop").addEventListener("click", stopComposition);
   }
 
-  function playMoodMelody(mood, key, scale, tempo, bars) {
-    stopMoodMelody();
-    moodPlaying = true;
-    document.getElementById("moodStop").disabled = false;
-    document.getElementById("moodVisualizer").style.display = "block";
-
-    const notes = generateMelody(mood, key, scale, tempo, bars);
-    const canvas = document.getElementById("moodCanvas");
-    const nowPlaying = document.getElementById("moodNowPlaying");
-    nowPlaying.textContent = `🎵 Playing: ${mood.charAt(0).toUpperCase() + mood.slice(1)} in ${key} ${scale} @ ${tempo} BPM`;
-
-    const startTime = ctx.currentTime + 0.1;
-    notes.forEach(note => {
-      playNote(note.freq, note.duration * 0.9, "triangle", startTime + note.time, 0.25);
-    });
-
-    // Visualizer
-    startCanvasVisualizer(canvas);
-
-    const totalDur = notes.length > 0 ? notes[notes.length - 1].time + notes[notes.length - 1].duration + 0.5 : 2;
-    moodTimeout = setTimeout(() => {
-      stopMoodMelody();
-      nowPlaying.textContent = "✓ Playback complete";
-    }, totalDur * 1000);
-  }
-
-  function stopMoodMelody() {
-    moodPlaying = false;
-    if (moodTimeout) { clearTimeout(moodTimeout); moodTimeout = null; }
+  function stopComposition() {
+    compositionPlaying = false;
+    if (compositionTimer) { clearInterval(compositionTimer); compositionTimer = null; }
     document.getElementById("moodStop").disabled = true;
+    document.getElementById("moodGenerate").classList.add("pulse-ready");
   }
 
-  // ======================== RAGA EXPLORER ========================
+  // --- PIANO ROLL VISUALIZER ---
+  function startPianoRollViz() {
+    const canvas = document.getElementById("moodPianoRoll");
+    if (!canvas) return;
+    const c = canvas.getContext("2d");
+    const W = canvas.width;
+    const H = canvas.height;
+
+    const layerColors = {
+      chord: "rgba(139,92,246,0.5)",
+      melody: "rgba(236,72,153,0.8)",
+      bass: "rgba(6,182,212,0.6)",
+      arp: "rgba(245,158,11,0.5)",
+    };
+
+    function draw() {
+      if (!compositionPlaying) return;
+      requestAnimationFrame(draw);
+      c.fillStyle = "#0f0f16";
+      c.fillRect(0, 0, W, H);
+
+      // Grid lines
+      c.strokeStyle = "rgba(42,42,58,0.5)";
+      c.lineWidth = 1;
+      for (let i = 0; i < 12; i++) {
+        const y = (i / 12) * H;
+        c.beginPath(); c.moveTo(0, y); c.lineTo(W, y); c.stroke();
+      }
+
+      if (compositionNotes.length === 0) return;
+
+      const elapsed = (ctx.currentTime - compositionStartTime);
+      const windowStart = Math.max(0, elapsed - 2);
+      const windowEnd = elapsed + compositionDuration * 0.3;
+
+      // Find MIDI range
+      let minMidi = 127, maxMidi = 0;
+      compositionNotes.forEach(n => {
+        if (n.midi < minMidi) minMidi = n.midi;
+        if (n.midi > maxMidi) maxMidi = n.midi;
+      });
+      const midiRange = Math.max(24, maxMidi - minMidi + 4);
+
+      compositionNotes.forEach(note => {
+        if (note.time + note.dur < windowStart || note.time > windowEnd) return;
+        const x = ((note.time - windowStart) / (windowEnd - windowStart)) * W;
+        const w = (note.dur / (windowEnd - windowStart)) * W;
+        const y = H - ((note.midi - minMidi + 2) / midiRange) * H;
+        const h = Math.max(3, (1 / midiRange) * H * 0.8);
+
+        c.fillStyle = layerColors[note.layer] || "rgba(255,255,255,0.3)";
+        c.beginPath();
+        c.roundRect(x, y, Math.max(2, w - 1), h, 2);
+        c.fill();
+
+        // Glow for currently playing
+        if (note.time <= elapsed && note.time + note.dur >= elapsed) {
+          c.shadowColor = layerColors[note.layer] || "#fff";
+          c.shadowBlur = 8;
+          c.fill();
+          c.shadowBlur = 0;
+        }
+      });
+
+      // Playhead
+      const phX = (elapsed - windowStart) / (windowEnd - windowStart) * W;
+      c.strokeStyle = "rgba(255,255,255,0.6)";
+      c.lineWidth = 2;
+      c.beginPath(); c.moveTo(phX, 0); c.lineTo(phX, H); c.stroke();
+    }
+    draw();
+  }
+
+  // --- WAVEFORM VISUALIZER ---
+  function startWaveformViz(canvas) {
+    if (!canvas || !analyser) return;
+    const c = canvas.getContext("2d");
+    const W = canvas.width;
+    const H = canvas.height;
+
+    (function draw() {
+      requestAnimationFrame(draw);
+      const bufLen = analyser.frequencyBinCount;
+      const data = new Uint8Array(bufLen);
+      analyser.getByteFrequencyData(data);
+
+      c.fillStyle = "#0f0f16";
+      c.fillRect(0, 0, W, H);
+
+      const barW = (W / bufLen) * 2.5;
+      let x = 0;
+      for (let i = 0; i < bufLen; i++) {
+        const h = (data[i] / 255) * H * 0.9;
+        const hue = 260 + (i / bufLen) * 80;
+        const alpha = 0.3 + (data[i] / 255) * 0.6;
+        c.fillStyle = `hsla(${hue},75%,55%,${alpha})`;
+        c.fillRect(x, H - h, barW - 1, h);
+        x += barW;
+      }
+    })();
+  }
+
+  // --- RAGA EXPLORER UI ---
   function initRagaExplorer() {
     renderRagaGrid(RAGAS);
-
     document.getElementById("ragaSearch").addEventListener("input", filterRagas);
     document.getElementById("ragaMoodFilter").addEventListener("change", filterRagas);
     document.getElementById("ragaTimeFilter").addEventListener("change", filterRagas);
     document.getElementById("ragaDetailClose").addEventListener("click", () => {
       document.getElementById("ragaDetail").style.display = "none";
-      stopRagaPlay();
+      stopRaga();
     });
-    document.getElementById("ragaPlayAroha").addEventListener("click", () => playRagaNotes("aroha"));
-    document.getElementById("ragaPlayAvaro").addEventListener("click", () => playRagaNotes("avaroha"));
+    document.getElementById("ragaPlayAroha").addEventListener("click", () => playRagaScale("aroha"));
+    document.getElementById("ragaPlayAvaro").addEventListener("click", () => playRagaScale("avaroha"));
+    document.getElementById("ragaPlayBoth").addEventListener("click", () => playRagaScale("both"));
     document.getElementById("ragaGeneratePhrase").addEventListener("click", generateRagaPhrase);
-    document.getElementById("ragaStopPlay").addEventListener("click", stopRagaPlay);
+    document.getElementById("ragaGenerateAlap").addEventListener("click", generateAlap);
+    document.getElementById("ragaStopPlay").addEventListener("click", stopRaga);
+
+    // Tanpura
+    document.getElementById("tanpuraToggle").addEventListener("click", () => {
+      initAudio();
+      const btn = document.getElementById("tanpuraToggle");
+      const controls = document.getElementById("tanpuraControls");
+      if (tanpuraActive) {
+        stopTanpura();
+        btn.classList.remove("active");
+        controls.style.display = "none";
+      } else {
+        const pitch = document.getElementById("tanpuraPitch").value;
+        const vol = parseInt(document.getElementById("tanpuraVol").value) / 100 * 0.25;
+        startTanpura(pitch, vol);
+        btn.classList.add("active");
+        controls.style.display = "flex";
+      }
+    });
+    document.getElementById("tanpuraPitch").addEventListener("change", () => {
+      if (tanpuraActive) {
+        const pitch = document.getElementById("tanpuraPitch").value;
+        const vol = parseInt(document.getElementById("tanpuraVol").value) / 100 * 0.25;
+        startTanpura(pitch, vol);
+      }
+    });
+    document.getElementById("tanpuraVol").addEventListener("input", () => {
+      if (tanpuraGain) {
+        tanpuraGain.gain.value = parseInt(document.getElementById("tanpuraVol").value) / 100 * 0.25;
+      }
+    });
   }
 
   function filterRagas() {
@@ -678,7 +1090,7 @@
     const mood = document.getElementById("ragaMoodFilter").value;
     const time = document.getElementById("ragaTimeFilter").value;
     const filtered = RAGAS.filter(r => {
-      if (search && !r.name.toLowerCase().includes(search) && !(r.aka && r.aka.toLowerCase().includes(search))) return false;
+      if (search && !r.name.toLowerCase().includes(search) && !(r.aka && r.aka.toLowerCase().includes(search)) && !r.desc.toLowerCase().includes(search)) return false;
       if (mood !== "all" && r.mood !== mood) return false;
       if (time !== "all" && r.time !== time) return false;
       return true;
@@ -688,111 +1100,193 @@
 
   function renderRagaGrid(ragas) {
     const grid = document.getElementById("ragaGrid");
-    if (!grid) return;
-    if (ragas.length === 0) {
-      grid.innerHTML = '<p style="color:var(--muted);text-align:center;padding:32px">No ragas match your filters</p>';
+    document.getElementById("ragaCount").textContent = `Showing ${ragas.length} of ${RAGAS.length} ragas`;
+    if (!ragas.length) {
+      grid.innerHTML = '<p style="color:var(--muted);text-align:center;padding:40px;font-size:0.85rem">No ragas match your filters. Try adjusting your search.</p>';
       return;
     }
-    grid.innerHTML = ragas.map((r, i) => `
-      <div class="raga-card" data-index="${RAGAS.indexOf(r)}">
+    grid.innerHTML = ragas.map(r => {
+      const idx = RAGAS.indexOf(r);
+      return `<div class="raga-card" data-index="${idx}">
         <div class="raga-card-name">${esc(r.name)}</div>
-        <div class="raga-card-mood">${esc(r.mood)} · ${esc(r.time)}</div>
-        <div class="raga-card-notes">${esc(r.aroha.join(" "))}</div>
-      </div>
-    `).join("");
+        ${r.aka ? `<div class="raga-card-aka">${esc(r.aka)}</div>` : ""}
+        <div class="raga-card-mood">🎭 ${esc(r.mood)} · 🕐 ${esc(r.time)}</div>
+        <div class="raga-card-notes">${esc(r.aroha.join(" · "))}</div>
+      </div>`;
+    }).join("");
 
     grid.querySelectorAll(".raga-card").forEach(card => {
       card.addEventListener("click", () => showRagaDetail(parseInt(card.dataset.index)));
     });
   }
 
-  let selectedRaga = null;
   function showRagaDetail(index) {
     initAudio();
     selectedRaga = RAGAS[index];
     if (!selectedRaga) return;
     document.getElementById("ragaDetail").style.display = "block";
     document.getElementById("ragaName").textContent = selectedRaga.name;
+    document.getElementById("ragaAka").textContent = selectedRaga.aka ? `Also known as: ${selectedRaga.aka}` : "";
     document.getElementById("ragaMeta").innerHTML = `
       <span>🎭 ${esc(selectedRaga.mood)}</span>
       <span>🕐 ${esc(selectedRaga.time)}</span>
-      ${selectedRaga.aka ? `<span>📝 ${esc(selectedRaga.aka)}</span>` : ""}
+      <span>📊 ${selectedRaga.aroha.length - 2} swaras (ascending)</span>
     `;
-    document.getElementById("ragaArohanam").textContent = selectedRaga.aroha.join("  ");
-    document.getElementById("ragaAvarohanam").textContent = selectedRaga.avaroha.join("  ");
-    document.getElementById("ragaDetail").scrollIntoView({ behavior: "smooth", block: "start" });
+    document.getElementById("ragaDesc").textContent = selectedRaga.desc;
+
+    // Render swara notes as interactive elements
+    document.getElementById("ragaArohanam").innerHTML = selectedRaga.aroha.map(s =>
+      `<span class="swara-note" data-swara="${s}">${s}</span>`
+    ).join("");
+    document.getElementById("ragaAvarohanam").innerHTML = selectedRaga.avaroha.map(s =>
+      `<span class="swara-note" data-swara="${s}">${s}</span>`
+    ).join("");
+
+    document.getElementById("ragaDetail").scrollIntoView({ behavior:"smooth", block:"nearest" });
   }
 
-  function playRagaNotes(direction) {
+  function playRagaScale(direction) {
     if (!selectedRaga || !ctx) return;
-    stopRagaPlay();
+    stopRaga();
     ragaPlaying = true;
-    const swaras = direction === "aroha" ? selectedRaga.aroha : selectedRaga.avaroha;
-    const baseFreq = 261.63; // C4 (Sa)
-    const freqs = ragaNotesToFreqs(swaras, baseFreq);
-    const dur = 0.5;
+    const baseFreq = 261.63; // C4
+    let swaras;
+    if (direction === "both") {
+      swaras = [...selectedRaga.aroha, ...selectedRaga.avaroha.slice(1)];
+    } else {
+      swaras = direction === "aroha" ? selectedRaga.aroha : selectedRaga.avaroha;
+    }
+    const freqs = ragaToFreqs(swaras, baseFreq);
+    const dur = 0.6;
     const canvas = document.getElementById("ragaCanvas");
-    startCanvasVisualizer(canvas);
+    startWaveformViz(canvas);
+
+    // Highlight swaras
+    const noteEls = document.querySelectorAll(`#raga${direction === "avaroha" ? "Avarohanam" : "Arohanam"} .swara-note`);
 
     freqs.forEach((f, i) => {
       const tid = setTimeout(() => {
         if (!ragaPlaying) return;
-        playNote(f, dur * 0.9, "triangle", ctx.currentTime, 0.3);
+        synthNote(f, dur * 0.85, "flute", ctx.currentTime, 0.3, true);
+        // Highlight
+        document.querySelectorAll(".swara-note.playing").forEach(el => el.classList.remove("playing"));
+        if (direction !== "both") {
+          if (noteEls[i]) noteEls[i].classList.add("playing");
+        }
       }, i * dur * 1000);
       ragaTimeouts.push(tid);
     });
 
-    ragaTimeouts.push(setTimeout(() => { ragaPlaying = false; }, freqs.length * dur * 1000 + 500));
+    ragaTimeouts.push(setTimeout(() => {
+      ragaPlaying = false;
+      document.querySelectorAll(".swara-note.playing").forEach(el => el.classList.remove("playing"));
+    }, freqs.length * dur * 1000 + 300));
   }
 
   function generateRagaPhrase() {
     if (!selectedRaga || !ctx) return;
-    stopRagaPlay();
+    stopRaga();
     ragaPlaying = true;
-    const allSwaras = [...selectedRaga.aroha.slice(0, -1), ...selectedRaga.avaroha.slice(0, -1)];
     const baseFreq = 261.63;
-    const phraseLen = 12 + Math.floor(Math.random() * 8);
+    const allSwaras = [...selectedRaga.aroha.slice(0, -1), ...selectedRaga.avaroha.slice(0, -1)];
+    const phraseLen = 16 + Math.floor(Math.random() * 12);
     const phrase = [];
-    let prev = 0;
-    for (let i = 0; i < phraseLen; i++) {
-      let next = prev + Math.floor(Math.random() * 3) - 1;
-      next = Math.max(0, Math.min(allSwaras.length - 1, next));
-      phrase.push(allSwaras[next]);
-      prev = next;
-    }
-    const freqs = ragaNotesToFreqs(phrase, baseFreq);
-    const dur = 0.35;
-    const canvas = document.getElementById("ragaCanvas");
-    startCanvasVisualizer(canvas);
+    let prev = Math.floor(allSwaras.length / 3);
 
+    for (let i = 0; i < phraseLen; i++) {
+      let step = Math.random() > 0.6 ? (Math.random() > 0.5 ? 2 : -2) : (Math.random() > 0.5 ? 1 : -1);
+      if (Math.random() > 0.85) step = 0; // pause on same note (sustain effect)
+      prev = Math.max(0, Math.min(allSwaras.length - 1, prev + step));
+      phrase.push(allSwaras[prev]);
+    }
+    // End on Sa
+    phrase.push("S");
+
+    const freqs = ragaToFreqs(phrase, baseFreq);
+    const durs = phrase.map(() => 0.25 + Math.random() * 0.25);
+    const canvas = document.getElementById("ragaCanvas");
+    startWaveformViz(canvas);
+
+    let t = 0;
     freqs.forEach((f, i) => {
       const tid = setTimeout(() => {
         if (!ragaPlaying) return;
-        playNote(f, dur * 0.85, "triangle", ctx.currentTime, 0.3);
-      }, i * dur * 1000);
+        synthNote(f, durs[i] * 0.85, "sitar", ctx.currentTime, 0.28, true);
+      }, t * 1000);
       ragaTimeouts.push(tid);
+      t += durs[i];
     });
-    ragaTimeouts.push(setTimeout(() => { ragaPlaying = false; }, freqs.length * dur * 1000 + 500));
+    ragaTimeouts.push(setTimeout(() => { ragaPlaying = false; }, t * 1000 + 500));
   }
 
-  function stopRagaPlay() {
+  function generateAlap() {
+    if (!selectedRaga || !ctx) return;
+    stopRaga();
+    ragaPlaying = true;
+    const baseFreq = 261.63;
+
+    // Alapana: slow, deliberate exploration of raga
+    const aroha = selectedRaga.aroha.slice(0, -1);
+    const notes = [];
+    // Start with Sa, gradually introduce each note
+    let maxReach = 1;
+    for (let phrase = 0; phrase < 6; phrase++) {
+      maxReach = Math.min(aroha.length, maxReach + 1);
+      const phraseNotes = [];
+      // Build up
+      for (let i = 0; i <= maxReach && i < aroha.length; i++) {
+        phraseNotes.push(aroha[i]);
+      }
+      // Come back down
+      for (let i = maxReach - 1; i >= 0; i--) {
+        if (i < aroha.length) phraseNotes.push(aroha[i]);
+      }
+      // Add some repetition and ornamentation
+      phraseNotes.forEach(n => {
+        notes.push(n);
+        if (Math.random() > 0.6) notes.push(n); // repeat
+      });
+      notes.push("S"); // return to Sa
+    }
+
+    const freqs = ragaToFreqs(notes, baseFreq);
+    const canvas = document.getElementById("ragaCanvas");
+    startWaveformViz(canvas);
+
+    let t = 0;
+    freqs.forEach((f, i) => {
+      const dur = 0.4 + Math.random() * 0.4;
+      const tid = setTimeout(() => {
+        if (!ragaPlaying) return;
+        synthNote(f, dur * 0.85, "flute", ctx.currentTime, 0.25, true);
+      }, t * 1000);
+      ragaTimeouts.push(tid);
+      t += dur;
+    });
+    ragaTimeouts.push(setTimeout(() => { ragaPlaying = false; }, t * 1000 + 500));
+  }
+
+  function stopRaga() {
     ragaPlaying = false;
     ragaTimeouts.forEach(t => clearTimeout(t));
     ragaTimeouts = [];
+    document.querySelectorAll(".swara-note.playing").forEach(el => el.classList.remove("playing"));
   }
 
-  // ======================== BEAT MAKER ========================
+  // --- BEAT MAKER UI ---
   function initBeatMaker() {
     buildSequencer();
-
     document.getElementById("beatTempo").addEventListener("input", (e) => {
       document.getElementById("beatTempoVal").textContent = e.target.value + " BPM";
     });
     document.getElementById("beatSwing").addEventListener("input", (e) => {
       document.getElementById("beatSwingVal").textContent = e.target.value + "%";
     });
+    document.getElementById("beatMasterVol").addEventListener("input", (e) => {
+      document.getElementById("beatMasterVolVal").textContent = e.target.value + "%";
+    });
     document.getElementById("beatPattern").addEventListener("change", (e) => {
-      if (e.target.value !== "custom") loadPreset(e.target.value);
+      if (e.target.value !== "custom") loadBeatPreset(e.target.value);
     });
     document.getElementById("beatPlay").addEventListener("click", startBeat);
     document.getElementById("beatStop").addEventListener("click", stopBeat);
@@ -801,72 +1295,81 @@
   }
 
   function buildSequencer() {
-    const headerEl = document.getElementById("seqStepsHeader");
-    const rowsEl = document.getElementById("seqRows");
-    headerEl.innerHTML = "";
-    rowsEl.innerHTML = "";
+    const header = document.getElementById("seqStepsHeader");
+    const rows = document.getElementById("seqRows");
+    header.innerHTML = "";
+    rows.innerHTML = "";
 
     for (let s = 0; s < STEPS; s++) {
       const num = document.createElement("div");
       num.className = "seq-step-num" + (s % 4 === 0 ? " beat" : "");
       num.textContent = s + 1;
-      headerEl.appendChild(num);
+      header.appendChild(num);
     }
 
     DRUM_ROWS.forEach(drum => {
       beatGrid[drum] = new Array(STEPS).fill(0);
+      beatVolumes[drum] = 80;
       const row = document.createElement("div");
       row.className = "seq-row";
-      row.innerHTML = `<div class="seq-row-label">${DRUM_LABELS[drum]}</div><div class="seq-row-steps" data-drum="${drum}"></div>`;
-      const stepsContainer = row.querySelector(".seq-row-steps");
+
+      const label = document.createElement("div");
+      label.className = "seq-row-label";
+      label.innerHTML = `<span class="drum-dot" style="background:${DRUM_COLORS[drum]}"></span>${DRUM_LABELS[drum]}`;
+
+      const volWrap = document.createElement("div");
+      volWrap.className = "seq-row-vol";
+      const volInput = document.createElement("input");
+      volInput.type = "range";
+      volInput.min = "0"; volInput.max = "100"; volInput.value = "80";
+      volInput.addEventListener("input", () => { beatVolumes[drum] = parseInt(volInput.value); });
+      volWrap.appendChild(volInput);
+
+      const stepsWrap = document.createElement("div");
+      stepsWrap.className = "seq-row-steps";
       for (let s = 0; s < STEPS; s++) {
         const cell = document.createElement("div");
-        cell.className = "seq-cell";
+        cell.className = "seq-cell" + (s % 4 === 0 ? " bar-start" : "");
         cell.dataset.step = s;
         cell.dataset.drum = drum;
-        cell.addEventListener("click", () => toggleCell(drum, s, cell));
-        stepsContainer.appendChild(cell);
+        cell.addEventListener("click", () => {
+          beatGrid[drum][s] = beatGrid[drum][s] ? 0 : 1;
+          cell.classList.toggle("active");
+          cell.classList.toggle(drum, beatGrid[drum][s]);
+        });
+        stepsWrap.appendChild(cell);
       }
-      rowsEl.appendChild(row);
+
+      row.appendChild(label);
+      row.appendChild(volWrap);
+      row.appendChild(stepsWrap);
+      rows.appendChild(row);
     });
   }
 
-  function toggleCell(drum, step, cell) {
-    beatGrid[drum][step] = beatGrid[drum][step] ? 0 : 1;
-    cell.classList.toggle("active");
-    cell.classList.toggle(drum);
-  }
-
-  function loadPreset(name) {
+  function loadBeatPreset(name) {
     const preset = BEAT_PRESETS[name];
     if (!preset) return;
     clearBeat();
     DRUM_ROWS.forEach(drum => {
       if (preset[drum]) {
         beatGrid[drum] = [...preset[drum]];
-        const cells = document.querySelectorAll(`.seq-cell[data-drum="${drum}"]`);
-        cells.forEach((cell, i) => {
-          if (preset[drum][i]) {
-            cell.classList.add("active", drum);
-          }
+        document.querySelectorAll(`.seq-cell[data-drum="${drum}"]`).forEach((cell, i) => {
+          if (preset[drum][i]) { cell.classList.add("active", drum); }
         });
       }
     });
   }
 
   function clearBeat() {
-    DRUM_ROWS.forEach(drum => {
-      beatGrid[drum] = new Array(STEPS).fill(0);
-    });
-    document.querySelectorAll(".seq-cell").forEach(c => {
-      c.className = "seq-cell";
-    });
+    DRUM_ROWS.forEach(drum => { beatGrid[drum] = new Array(STEPS).fill(0); });
+    document.querySelectorAll(".seq-cell").forEach(c => { c.className = c.className.replace(/active|kick|snare|hihat|openhat|clap|tom|rim|shaker/g, "").trim(); });
   }
 
   function randomizeBeat() {
     clearBeat();
     DRUM_ROWS.forEach(drum => {
-      const density = drum === "kick" ? 0.3 : drum === "hihat" ? 0.5 : 0.15;
+      const density = drum === "kick" ? 0.28 : drum === "snare" ? 0.18 : drum === "hihat" ? 0.5 : 0.1;
       for (let s = 0; s < STEPS; s++) {
         if (Math.random() < density) {
           beatGrid[drum][s] = 1;
@@ -884,22 +1387,23 @@
     beatStep = 0;
     document.getElementById("beatPlay").disabled = true;
     document.getElementById("beatStop").disabled = false;
+    startWaveformViz(document.getElementById("beatWaveform"));
 
     function tick() {
       if (!beatPlaying) return;
       const tempo = parseInt(document.getElementById("beatTempo").value);
       const swing = parseInt(document.getElementById("beatSwing").value) / 100;
+      const masterVol = parseInt(document.getElementById("beatMasterVol").value) / 100;
       const stepDur = (60 / tempo) / 4;
-      const swingOffset = (beatStep % 2 === 1) ? stepDur * swing * 0.3 : 0;
+      const swingOff = (beatStep % 2 === 1) ? stepDur * swing * 0.33 : 0;
 
-      // Highlight current step
       document.querySelectorAll(".seq-cell.playing").forEach(c => c.classList.remove("playing"));
       document.querySelectorAll(`.seq-cell[data-step="${beatStep}"]`).forEach(c => c.classList.add("playing"));
 
-      // Play active drums
       DRUM_ROWS.forEach(drum => {
         if (beatGrid[drum][beatStep]) {
-          playDrum(drum, ctx.currentTime + swingOffset);
+          const vol = (beatVolumes[drum] / 100) * masterVol;
+          synthDrum(drum, ctx.currentTime + swingOff, vol);
         }
       });
 
@@ -917,160 +1421,128 @@
     document.getElementById("beatStop").disabled = true;
   }
 
-  // ======================== FREE PLAY (KEYBOARD) ========================
-  const WHITE_NOTES = ["C", "D", "E", "F", "G", "A", "B"];
-  const BLACK_NOTES = { 0: "C#", 1: "D#", 3: "F#", 4: "G#", 5: "A#" };
-  const KEY_MAP = {
-    a: 0, s: 1, d: 2, f: 3, g: 4, h: 5, j: 6, k: 7,  // white
-    w: "C#", e: "D#", t: "F#", y: "G#", u: "A#",       // black
-  };
+  // --- FREE PLAY UI ---
+  const WHITE = ["C","D","E","F","G","A","B"];
+  const BLACK_MAP = { 0:"C#", 1:"D#", 3:"F#", 4:"G#", 5:"A#" };
+  const KB_MAP = { a:0, s:1, d:2, f:3, g:4, h:5, j:6, k:7 }; // white
+  const KB_BLACK = { w:"C#", e:"D#", t:"F#", y:"G#", u:"A#" };
 
   function initFreePlay() {
     buildKeyboard();
-
-    document.getElementById("fpVolume").addEventListener("input", (e) => {
-      document.getElementById("fpVolumeVal").textContent = e.target.value + "%";
-      if (masterGain) masterGain.gain.value = e.target.value / 100;
+    ["fpVolume","fpReverb","fpDelay"].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener("input", () => {
+        document.getElementById(id + "Val").textContent = el.value + "%";
+        if (id === "fpVolume" && masterGain) masterGain.gain.value = el.value / 100;
+        if (id === "fpDelay" && delayWet) delayWet.gain.value = el.value / 100 * 0.4;
+      });
     });
-    document.getElementById("fpReverb").addEventListener("input", (e) => {
-      document.getElementById("fpReverbVal").textContent = e.target.value + "%";
+    document.getElementById("fpOctave").addEventListener("change", (e) => {
+      document.getElementById("octaveIndicator").textContent = "Octave: " + e.target.value;
     });
 
-    // Keyboard input
-    const activeKeys = new Set();
+    const active = new Set();
     document.addEventListener("keydown", (e) => {
       if (currentTab !== "freeplay" || e.repeat) return;
       const k = e.key.toLowerCase();
-      if (activeKeys.has(k)) return;
-      activeKeys.add(k);
-      handleKeyPress(k, true);
+      if (k === "z") {
+        const sel = document.getElementById("fpOctave");
+        sel.value = Math.max(2, parseInt(sel.value) - 1);
+        sel.dispatchEvent(new Event("change"));
+        return;
+      }
+      if (k === "x") {
+        const sel = document.getElementById("fpOctave");
+        sel.value = Math.min(6, parseInt(sel.value) + 1);
+        sel.dispatchEvent(new Event("change"));
+        return;
+      }
+      if (active.has(k)) return;
+      active.add(k);
+      triggerKey(k, true);
     });
     document.addEventListener("keyup", (e) => {
       const k = e.key.toLowerCase();
-      activeKeys.delete(k);
-      handleKeyPress(k, false);
+      active.delete(k);
+      triggerKey(k, false);
     });
 
-    // Canvas vis
-    const canvas = document.getElementById("fpCanvas");
-    startCanvasVisualizer(canvas);
+    startWaveformViz(document.getElementById("fpCanvas"));
   }
 
   function buildKeyboard() {
     const kb = document.getElementById("keyboard");
     if (!kb) return;
     kb.innerHTML = "";
-
-    WHITE_NOTES.forEach((note, i) => {
+    WHITE.forEach((note, i) => {
       const key = document.createElement("div");
       key.className = "key key-white";
       key.dataset.note = note;
       key.textContent = note;
-      key.addEventListener("mousedown", () => {
-        initAudio();
-        triggerFreeNote(note, true);
-        key.classList.add("active");
-      });
-      key.addEventListener("mouseup", () => key.classList.remove("active"));
-      key.addEventListener("mouseleave", () => key.classList.remove("active"));
+      key.addEventListener("mousedown", () => { initAudio(); playFreeNote(note); key.classList.add("pressed"); });
+      key.addEventListener("mouseup", () => key.classList.remove("pressed"));
+      key.addEventListener("mouseleave", () => key.classList.remove("pressed"));
       kb.appendChild(key);
 
-      // Black key
-      if (BLACK_NOTES[i] !== undefined) {
-        const bkey = document.createElement("div");
-        bkey.className = "key key-black";
-        bkey.dataset.note = BLACK_NOTES[i];
-        bkey.textContent = BLACK_NOTES[i];
-        bkey.addEventListener("mousedown", () => {
-          initAudio();
-          triggerFreeNote(BLACK_NOTES[i], true);
-          bkey.classList.add("active");
-        });
-        bkey.addEventListener("mouseup", () => bkey.classList.remove("active"));
-        bkey.addEventListener("mouseleave", () => bkey.classList.remove("active"));
-        kb.appendChild(bkey);
+      if (BLACK_MAP[i] !== undefined) {
+        const bk = document.createElement("div");
+        bk.className = "key key-black";
+        bk.dataset.note = BLACK_MAP[i];
+        bk.textContent = BLACK_MAP[i].replace("#","♯");
+        bk.addEventListener("mousedown", () => { initAudio(); playFreeNote(BLACK_MAP[i]); bk.classList.add("pressed"); });
+        bk.addEventListener("mouseup", () => bk.classList.remove("pressed"));
+        bk.addEventListener("mouseleave", () => bk.classList.remove("pressed"));
+        kb.appendChild(bk);
       }
     });
   }
 
-  function handleKeyPress(k, isDown) {
-    if (KEY_MAP[k] === undefined) return;
-    initAudio();
+  function triggerKey(k, down) {
     let note;
-    if (typeof KEY_MAP[k] === "number") {
-      note = WHITE_NOTES[KEY_MAP[k]];
+    if (KB_MAP[k] !== undefined) note = WHITE[KB_MAP[k]];
+    else if (KB_BLACK[k]) note = KB_BLACK[k];
+    else return;
+
+    const el = document.querySelector(`.key[data-note="${note}"]`);
+    if (down) {
+      initAudio();
+      playFreeNote(note);
+      if (el) el.classList.add("pressed");
     } else {
-      note = KEY_MAP[k];
-    }
-    const keyEl = document.querySelector(`.key[data-note="${note}"]`);
-    if (isDown) {
-      triggerFreeNote(note, true);
-      if (keyEl) keyEl.classList.add("active");
-    } else {
-      if (keyEl) keyEl.classList.remove("active");
+      if (el) el.classList.remove("pressed");
     }
   }
 
-  function triggerFreeNote(note, play) {
-    if (!play || !ctx) return;
+  function playFreeNote(note) {
     const octave = parseInt(document.getElementById("fpOctave").value);
     const instrument = document.getElementById("fpInstrument").value;
-    const vol = parseInt(document.getElementById("fpVolume").value) / 100 * 0.4;
-    const freq = noteFreq(note, octave);
-    playInstrumentNote(freq, 0.8, instrument, ctx.currentTime, vol);
-  }
+    const vol = parseInt(document.getElementById("fpVolume").value) / 100 * 0.35;
+    const freq = midiToFreq(noteToMidi(note, octave));
+    synthNote(freq, 1.2, instrument, ctx.currentTime, vol, true);
 
-  // ======================== CANVAS VISUALIZER ========================
-  function startCanvasVisualizer(canvas) {
-    if (!canvas) return;
-    const canvasCtx = canvas.getContext("2d");
-    function draw() {
-      requestAnimationFrame(draw);
-      if (!analyser) return;
-      const bufLen = analyser.frequencyBinCount;
-      const data = new Uint8Array(bufLen);
-      analyser.getByteFrequencyData(data);
-
-      canvasCtx.fillStyle = "#1a1a24";
-      canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
-
-      const barW = (canvas.width / bufLen) * 2.5;
-      let x = 0;
-      for (let i = 0; i < bufLen; i++) {
-        const h = (data[i] / 255) * canvas.height * 0.9;
-        const hue = 260 + (i / bufLen) * 60;
-        canvasCtx.fillStyle = `hsla(${hue}, 80%, 60%, 0.8)`;
-        canvasCtx.fillRect(x, canvas.height - h, barW - 1, h);
-        x += barW;
-      }
-    }
-    draw();
-  }
-
-  // ======================== MOBILE NAV ========================
-  function initNav() {
-    const toggle = document.getElementById("navToggle");
-    const navLinks = document.getElementById("navLinks");
-    if (toggle && navLinks) {
-      toggle.addEventListener("click", () => navLinks.classList.toggle("open"));
-      navLinks.querySelectorAll("a").forEach(a =>
-        a.addEventListener("click", () => navLinks.classList.remove("open"))
-      );
+    // Feed delay
+    const delayAmt = parseInt(document.getElementById("fpDelay")?.value || 0) / 100;
+    if (delayAmt > 0 && delayNode) {
+      const src = ctx.createOscillator();
+      const g = ctx.createGain();
+      src.type = "triangle";
+      src.frequency.value = freq;
+      g.gain.setValueAtTime(vol * 0.3, ctx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
+      src.connect(g);
+      g.connect(delayNode);
+      src.start(ctx.currentTime);
+      src.stop(ctx.currentTime + 0.3);
     }
   }
 
-  // ======================== UTIL ========================
-  function esc(str) {
-    const d = document.createElement("div");
-    d.textContent = str;
-    return d.innerHTML;
-  }
-
-  // ======================== INIT ========================
+  /* ================================================================
+     INIT
+     ================================================================ */
   function init() {
     initNav();
     initTabs();
-    initHeroVisualizer();
+    initHeroViz();
     initMoodComposer();
     initRagaExplorer();
     initBeatMaker();
