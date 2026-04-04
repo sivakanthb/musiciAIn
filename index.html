@@ -24,8 +24,8 @@
       </a>
       <div class="nav-links" id="navLinks">
         <a href="#" data-tab="mood" class="active">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>
-          Mood Composer
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+          Composer
         </a>
         <a href="#" data-tab="raga">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
@@ -53,7 +53,7 @@
       <div class="hero-visualizer" id="heroVisualizer"></div>
       <h1 class="hero-title">Musici<span class="ai-highlight">AI</span>n</h1>
       <p class="hero-sub">Professional AI Music Composer</p>
-      <p class="hero-desc">Generate multi-layered compositions from moods, explore 72 Indian ragas with tanpura drone, craft beats with a pro sequencer, or play a virtual keyboard with 5 instruments</p>
+      <p class="hero-desc">Compose multi-layered music with AI — shape it through mood, style, and complexity. Explore 72 Indian ragas with tanpura drone, craft beats with a pro sequencer, or play a virtual keyboard with 5 instruments</p>
       <div class="hero-stats">
         <div class="stat"><strong>4</strong><span>Studio Modes</span></div>
         <div class="stat"><strong>72</strong><span>Ragas</span></div>
@@ -71,13 +71,49 @@
       <section class="tab-panel active" id="tab-mood">
         <div class="panel-header">
           <div class="panel-title-row">
-            <h2 class="panel-title">🎭 Mood Composer</h2>
+            <h2 class="panel-title">� Composer</h2>
             <div class="panel-badge">AI-Powered</div>
           </div>
-          <p class="panel-desc">Select a mood — AI generates a multi-layered composition with chord progressions, melody, bass, and arpeggiation following real music theory</p>
+          <p class="panel-desc">Shape your composition through mood, style, and complexity — AI weaves multi-layered music with real chord progressions, voice leading, motif development, and dynamic expression</p>
         </div>
 
-        <!-- Mood Selection -->
+        <!-- Creative Direction -->
+        <div class="control-panel" style="margin-bottom:16px">
+          <div class="control-panel-title">Creative Direction</div>
+          <div class="controls-row">
+            <div class="control-group">
+              <label>Style</label>
+              <select id="compStyle">
+                <option value="auto">Auto (AI Pick)</option>
+                <option value="classical">Classical</option>
+                <option value="cinematic">Cinematic / Film</option>
+                <option value="jazz">Jazz</option>
+                <option value="ambient">Ambient / Atmospheric</option>
+                <option value="pop">Pop</option>
+                <option value="electronic">Electronic</option>
+                <option value="folk">Folk / Acoustic</option>
+                <option value="rnb">R&B / Soul</option>
+              </select>
+            </div>
+            <div class="control-group">
+              <label>Complexity</label>
+              <div class="range-with-val">
+                <input type="range" id="compComplexity" min="1" max="10" value="5" />
+                <span class="range-val" id="compComplexityVal">5</span>
+              </div>
+            </div>
+            <div class="control-group">
+              <label>Energy</label>
+              <div class="range-with-val">
+                <input type="range" id="compEnergy" min="1" max="10" value="5" />
+                <span class="range-val" id="compEnergyVal">5</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Mood / Emotion (optional creative input) -->
+        <div class="control-panel-title" style="margin-bottom:8px">Mood / Emotion <span style="font-weight:400;font-size:0.6rem;color:var(--muted);text-transform:none;letter-spacing:0">(select one to influence the feel)</span></div>
         <div class="mood-grid" id="moodGrid">
           <button class="mood-card" data-mood="happy">
             <span class="mood-emoji">😊</span>
