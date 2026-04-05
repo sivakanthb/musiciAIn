@@ -39,6 +39,10 @@
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="10" width="20" height="12" rx="1"/><rect x="4" y="10" width="2" height="7" fill="currentColor"/><rect x="8" y="10" width="2" height="7" fill="currentColor"/><rect x="14" y="10" width="2" height="7" fill="currentColor"/><rect x="18" y="10" width="2" height="7" fill="currentColor"/></svg>
           Free Play
         </a>
+        <a href="#" data-tab="transcribe">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M9 15l2 2 4-4"/></svg>
+          Transcriber
+        </a>
       </div>
       <button class="nav-toggle" id="navToggle" aria-label="Menu">
         <span></span><span></span><span></span>
@@ -53,9 +57,9 @@
       <div class="hero-visualizer" id="heroVisualizer"></div>
       <h1 class="hero-title">Musici<span class="ai-highlight">AI</span>n</h1>
       <p class="hero-sub">Professional AI Music Composer</p>
-      <p class="hero-desc">Compose multi-layered music with AI — shape it through mood, style, and complexity. Explore 72 Indian ragas with tanpura drone, craft beats with a pro sequencer, or play a virtual keyboard with 5 instruments</p>
+      <p class="hero-desc">Compose multi-layered music with AI, transcribe live instruments to sheet music, explore 72 Indian ragas, craft beats with a pro sequencer, or play a virtual keyboard with 5 instruments</p>
       <div class="hero-stats">
-        <div class="stat"><strong>4</strong><span>Studio Modes</span></div>
+        <div class="stat"><strong>5</strong><span>Studio Modes</span></div>
         <div class="stat"><strong>72</strong><span>Ragas</span></div>
         <div class="stat"><strong>12</strong><span>Moods</span></div>
         <div class="stat"><strong>∞</strong><span>Compositions</span></div>
@@ -514,6 +518,116 @@
 
         <div class="fp-viz">
           <canvas id="fpCanvas" width="1200" height="120"></canvas>
+        </div>
+      </section>
+
+      <!-- ======================== TRANSCRIBER ======================== -->
+      <section class="tab-panel" id="tab-transcribe">
+        <div class="panel-header">
+          <div class="panel-title-row">
+            <h2 class="panel-title">🎼 Transcriber</h2>
+            <div class="panel-badge">Live Pitch Detection</div>
+          </div>
+          <p class="panel-desc">Play any instrument into your microphone — flute, guitar, violin, or voice — and watch MusiciAIn transcribe it into musical notation in real time. Download the generated sheet music as PNG or PDF.</p>
+        </div>
+
+        <div class="controls-row" style="margin-bottom:20px">
+          <div class="control-group">
+            <label>Input Device</label>
+            <select id="trMicSelect"><option>Default Microphone</option></select>
+          </div>
+          <div class="control-group">
+            <label>Sensitivity</label>
+            <div class="range-with-val">
+              <input type="range" id="trSensitivity" min="1" max="10" value="5" />
+              <span class="range-val" id="trSensitivityVal">5</span>
+            </div>
+          </div>
+          <div class="control-group">
+            <label>Min Note Duration</label>
+            <select id="trMinDuration">
+              <option value="0.08">Fast (32nd)</option>
+              <option value="0.12" selected>Normal (16th)</option>
+              <option value="0.2">Slow (8th)</option>
+            </select>
+          </div>
+          <div class="control-group">
+            <label>Transpose</label>
+            <select id="trTranspose">
+              <option value="0" selected>None</option>
+              <option value="1">+1 semitone</option>
+              <option value="2">+2 semitones</option>
+              <option value="-1">-1 semitone</option>
+              <option value="-2">-2 semitones</option>
+              <option value="12">+1 octave</option>
+              <option value="-12">-1 octave</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Live info bar -->
+        <div class="tr-live-bar" id="trLiveBar">
+          <div class="tr-live-note">
+            <span class="tr-note-name" id="trNoteName">—</span>
+            <span class="tr-note-freq" id="trNoteFreq"></span>
+          </div>
+          <div class="tr-live-meter">
+            <div class="tr-confidence-bar" id="trConfBar"></div>
+          </div>
+          <div class="tr-live-stats">
+            <span id="trNoteCount">0 notes</span>
+            <span id="trDuration">0:00</span>
+          </div>
+        </div>
+
+        <!-- Action buttons -->
+        <div class="action-row" style="margin-bottom:20px">
+          <button class="btn btn-lg btn-primary" id="trStartBtn">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3" fill="currentColor"/></svg>
+            Start Listening
+          </button>
+          <button class="btn btn-lg" id="trStopBtn" disabled>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
+            Stop
+          </button>
+          <button class="btn btn-lg" id="trClearBtn">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4h8v2M5 6v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V6"/></svg>
+            Clear
+          </button>
+        </div>
+
+        <!-- Live pitch visualization -->
+        <div class="tr-pitch-viz">
+          <canvas id="trPitchCanvas" width="1200" height="100"></canvas>
+        </div>
+
+        <!-- Sheet music canvas -->
+        <div class="tr-sheet-container" id="trSheetContainer">
+          <div class="tr-sheet-header">
+            <h3>Sheet Music</h3>
+            <div class="tr-download-btns">
+              <button class="btn btn-sm" id="trDownloadPng">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+                PNG
+              </button>
+              <button class="btn btn-sm" id="trDownloadPdf">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+                PDF
+              </button>
+            </div>
+          </div>
+          <div class="tr-sheet-scroll">
+            <canvas id="trSheetCanvas" width="1600" height="400"></canvas>
+          </div>
+        </div>
+
+        <!-- Detected notes list -->
+        <div class="tr-notes-panel" id="trNotesPanel">
+          <div class="tr-notes-header">
+            <h3>Detected Notes</h3>
+            <span class="tr-notes-count" id="trNotesCount">0 notes</span>
+          </div>
+          <div class="tr-notes-list" id="trNotesList"></div>
         </div>
       </section>
 

@@ -1984,6 +1984,662 @@
   }
 
   /* ================================================================
+     TRANSCRIBER — Live pitch detection → sheet music
+     Uses YIN algorithm for robust monophonic pitch detection
+     ================================================================ */
+  const TR = {
+    stream: null,
+    audioCtx: null,
+    analyser: null,
+    source: null,
+    running: false,
+    rafId: null,
+    notes: [],          // {name, octave, midi, freq, startTime, duration, confidence}
+    startTs: 0,
+    currentNote: null,
+    currentStart: 0,
+    noteThreshold: 0.15, // confidence threshold
+    minDuration: 0.12,
+    transpose: 0,
+    sensitivity: 5,
+    buffer: null,
+  };
+
+  // Note name lookup
+  const NOTE_NAMES = ["C","C♯","D","D♯","E","F","F♯","G","G♯","A","A♯","B"];
+  const NOTE_NAMES_FLAT = ["C","D♭","D","E♭","E","F","G♭","G","A♭","A","B♭","B"];
+
+  function midiToNoteName(midi) {
+    const n = midi % 12;
+    const oct = Math.floor(midi / 12) - 1;
+    return { name: NOTE_NAMES[n], octave: oct, display: NOTE_NAMES[n] + oct };
+  }
+
+  // === YIN pitch detection ===
+  function yinPitchDetect(buf, sampleRate) {
+    const halfLen = Math.floor(buf.length / 2);
+    const yinBuf = new Float32Array(halfLen);
+
+    // Step 1: Difference function
+    for (let tau = 0; tau < halfLen; tau++) {
+      let sum = 0;
+      for (let i = 0; i < halfLen; i++) {
+        const d = buf[i] - buf[i + tau];
+        sum += d * d;
+      }
+      yinBuf[tau] = sum;
+    }
+
+    // Step 2: Cumulative mean normalized difference
+    yinBuf[0] = 1;
+    let runningSum = 0;
+    for (let tau = 1; tau < halfLen; tau++) {
+      runningSum += yinBuf[tau];
+      yinBuf[tau] = yinBuf[tau] * tau / runningSum;
+    }
+
+    // Step 3: Absolute threshold — find first dip below threshold
+    const threshold = 0.15;
+    let tauEstimate = -1;
+    for (let tau = 2; tau < halfLen; tau++) {
+      if (yinBuf[tau] < threshold) {
+        while (tau + 1 < halfLen && yinBuf[tau + 1] < yinBuf[tau]) tau++;
+        tauEstimate = tau;
+        break;
+      }
+    }
+    if (tauEstimate === -1) {
+      // Fallback: find global minimum
+      let minVal = Infinity, minTau = -1;
+      for (let tau = 2; tau < halfLen; tau++) {
+        if (yinBuf[tau] < minVal) { minVal = yinBuf[tau]; minTau = tau; }
+      }
+      if (minVal < 0.3) tauEstimate = minTau; else return { freq: -1, confidence: 0 };
+    }
+
+    // Step 4: Parabolic interpolation for better accuracy
+    const s0 = tauEstimate > 0 ? yinBuf[tauEstimate - 1] : yinBuf[tauEstimate];
+    const s1 = yinBuf[tauEstimate];
+    const s2 = tauEstimate + 1 < halfLen ? yinBuf[tauEstimate + 1] : yinBuf[tauEstimate];
+    let betterTau = tauEstimate;
+    const denom = 2 * s1 - s2 - s0;
+    if (denom !== 0) betterTau = tauEstimate + (s2 - s0) / (2 * denom);
+
+    const freq = sampleRate / betterTau;
+    const confidence = 1 - yinBuf[tauEstimate];
+    return { freq, confidence };
+  }
+
+  function freqToMidi(freq) {
+    return Math.round(12 * Math.log2(freq / 440) + 69);
+  }
+
+  // === Pitch analysis loop ===
+  function trAnalyzeFrame() {
+    if (!TR.running) return;
+    TR.rafId = requestAnimationFrame(trAnalyzeFrame);
+
+    TR.analyser.getFloatTimeDomainData(TR.buffer);
+
+    // Check signal level (RMS)
+    let rms = 0;
+    for (let i = 0; i < TR.buffer.length; i++) rms += TR.buffer[i] * TR.buffer[i];
+    rms = Math.sqrt(rms / TR.buffer.length);
+
+    const sensitivityThreshold = 0.003 + (10 - TR.sensitivity) * 0.004;
+
+    const now = (Date.now() - TR.startTs) / 1000;
+    const confBar = document.getElementById("trConfBar");
+    const noteNameEl = document.getElementById("trNoteName");
+    const noteFreqEl = document.getElementById("trNoteFreq");
+
+    if (rms < sensitivityThreshold) {
+      // Silence — end current note
+      if (TR.currentNote !== null) {
+        const dur = now - TR.currentStart;
+        if (dur >= TR.minDuration) {
+          TR.notes.push({ ...TR.currentNote, startTime: TR.currentStart, duration: dur });
+          trUpdateUI();
+        }
+        TR.currentNote = null;
+      }
+      noteNameEl.textContent = "—";
+      noteNameEl.classList.remove("active");
+      noteFreqEl.textContent = "";
+      if (confBar) confBar.style.width = "0%";
+      trDrawPitch(now, -1, 0);
+      return;
+    }
+
+    const { freq, confidence } = yinPitchDetect(TR.buffer, TR.audioCtx.sampleRate);
+
+    if (freq < 50 || freq > 4200 || confidence < TR.noteThreshold) {
+      // Not a clear pitch
+      if (confBar) confBar.style.width = Math.round(confidence * 100) + "%";
+      trDrawPitch(now, -1, confidence);
+      return;
+    }
+
+    let midi = freqToMidi(freq) + TR.transpose;
+    const noteInfo = midiToNoteName(midi);
+    const confPct = Math.round(confidence * 100);
+
+    noteNameEl.textContent = noteInfo.display;
+    noteNameEl.classList.add("active");
+    noteFreqEl.textContent = freq.toFixed(1) + " Hz";
+    if (confBar) confBar.style.width = confPct + "%";
+
+    // Check if same note continues or new note
+    if (TR.currentNote && TR.currentNote.midi === midi) {
+      // Same note continues
+      trDrawPitch(now, midi, confidence);
+    } else {
+      // New note — save previous if long enough
+      if (TR.currentNote !== null) {
+        const dur = now - TR.currentStart;
+        if (dur >= TR.minDuration) {
+          TR.notes.push({ ...TR.currentNote, startTime: TR.currentStart, duration: dur });
+        }
+      }
+      TR.currentNote = { name: noteInfo.name, octave: noteInfo.octave, display: noteInfo.display, midi, freq, confidence };
+      TR.currentStart = now;
+      trDrawPitch(now, midi, confidence);
+      trUpdateUI();
+    }
+
+    // Update duration display
+    const durEl = document.getElementById("trDuration");
+    if (durEl) {
+      const mins = Math.floor(now / 60);
+      const secs = Math.floor(now % 60);
+      durEl.textContent = mins + ":" + String(secs).padStart(2, "0");
+    }
+  }
+
+  // === Live pitch visualization (scrolling waveform) ===
+  const trPitchHistory = [];
+
+  function trDrawPitch(time, midi, conf) {
+    trPitchHistory.push({ time, midi, conf });
+    // Keep last 10 seconds
+    while (trPitchHistory.length > 0 && trPitchHistory[0].time < time - 10) trPitchHistory.shift();
+
+    const canvas = document.getElementById("trPitchCanvas");
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    const W = canvas.width, H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
+
+    // Background grid
+    ctx.strokeStyle = "rgba(90,90,114,0.2)";
+    ctx.lineWidth = 1;
+    for (let y = 0; y < H; y += 20) {
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+    }
+
+    if (trPitchHistory.length < 2) return;
+
+    const tStart = trPitchHistory[0].time;
+    const tEnd = trPitchHistory[trPitchHistory.length - 1].time;
+    const tRange = Math.max(tEnd - tStart, 1);
+
+    // Map MIDI to vertical: C2=36 at bottom, C7=96 at top
+    const midiLow = 36, midiHigh = 96;
+    const midiToY = (m) => H - ((m - midiLow) / (midiHigh - midiLow)) * H;
+
+    // Draw connected pitch line
+    ctx.beginPath();
+    ctx.strokeStyle = "#8b5cf6";
+    ctx.lineWidth = 2.5;
+    let started = false;
+    trPitchHistory.forEach(p => {
+      if (p.midi < 0) { started = false; return; }
+      const x = ((p.time - tStart) / tRange) * W;
+      const y = midiToY(p.midi);
+      if (!started) { ctx.moveTo(x, y); started = true; }
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+
+    // Glow dots for current position
+    const last = trPitchHistory[trPitchHistory.length - 1];
+    if (last.midi > 0) {
+      const x = W - 2;
+      const y = midiToY(last.midi);
+      ctx.beginPath();
+      ctx.arc(x, y, 5, 0, Math.PI * 2);
+      ctx.fillStyle = "#10b981";
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(x, y, 10, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(16,185,129,0.2)";
+      ctx.fill();
+    }
+
+    // Note labels on the right edge
+    ctx.font = "10px 'JetBrains Mono', monospace";
+    ctx.fillStyle = "rgba(152,152,176,0.5)";
+    ctx.textAlign = "right";
+    for (let m = midiLow; m <= midiHigh; m += 12) {
+      const info = midiToNoteName(m);
+      ctx.fillText(info.display, W - 8, midiToY(m) + 3);
+    }
+  }
+
+  // === UI updates (note count, pill list) ===
+  function trUpdateUI() {
+    const total = TR.notes.length + (TR.currentNote ? 1 : 0);
+    const countEl1 = document.getElementById("trNoteCount");
+    const countEl2 = document.getElementById("trNotesCount");
+    if (countEl1) countEl1.textContent = total + " note" + (total !== 1 ? "s" : "");
+    if (countEl2) countEl2.textContent = total + " notes";
+
+    // Update pill list
+    const list = document.getElementById("trNotesList");
+    if (!list) return;
+    list.innerHTML = "";
+    const allNotes = [...TR.notes];
+    if (TR.currentNote) allNotes.push({ ...TR.currentNote, startTime: TR.currentStart, duration: 0 });
+
+    allNotes.forEach(n => {
+      const pill = document.createElement("span");
+      pill.className = "tr-note-pill";
+      const durLabel = n.duration > 0 ? n.duration.toFixed(2) + "s" : "...";
+      pill.innerHTML = `<span class="pill-name">${n.display}</span><span class="pill-dur">${durLabel}</span>`;
+      list.appendChild(pill);
+    });
+    list.scrollLeft = list.scrollWidth;
+
+    // Render sheet music
+    trRenderSheet();
+  }
+
+  // === Sheet Music Renderer (canvas-based standard notation) ===
+  function trRenderSheet() {
+    const allNotes = [...TR.notes];
+    if (allNotes.length === 0) return;
+
+    const canvas = document.getElementById("trSheetCanvas");
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+
+    // Layout constants
+    const staffTop = 60;
+    const lineGap = 12;       // space between staff lines
+    const noteSpacing = 50;   // horizontal space per note
+    const leftMargin = 80;
+    const rightPad = 40;
+    const staffHeight = lineGap * 4;
+
+    // Calculate needed width — wrap into systems
+    const notesPerSystem = Math.floor((1200 - leftMargin - rightPad) / noteSpacing);
+    const numSystems = Math.ceil(allNotes.length / notesPerSystem);
+    const systemHeight = staffHeight + 90;
+    const totalHeight = staffTop + numSystems * systemHeight + 40;
+
+    canvas.width = 1600;
+    canvas.height = Math.max(400, totalHeight);
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#fefefe";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Title
+    ctx.fillStyle = "#1a1a2e";
+    ctx.font = "bold 18px Inter, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("MusiciAIn — Transcription", canvas.width / 2, 30);
+    ctx.font = "12px Inter, sans-serif";
+    ctx.fillStyle = "#666";
+    const dateStr = new Date().toLocaleDateString() + "  •  " + allNotes.length + " notes";
+    ctx.fillText(dateStr, canvas.width / 2, 48);
+
+    // Draw each system of staves
+    for (let sys = 0; sys < numSystems; sys++) {
+      const sysY = staffTop + sys * systemHeight;
+      const noteStart = sys * notesPerSystem;
+      const noteEnd = Math.min(noteStart + notesPerSystem, allNotes.length);
+
+      // Draw 5 staff lines
+      ctx.strokeStyle = "#ccc";
+      ctx.lineWidth = 1;
+      for (let l = 0; l < 5; l++) {
+        const y = sysY + l * lineGap;
+        ctx.beginPath();
+        ctx.moveTo(leftMargin - 10, y);
+        ctx.lineTo(leftMargin + (noteEnd - noteStart) * noteSpacing + 20, y);
+        ctx.stroke();
+      }
+
+      // Treble clef symbol (simplified)
+      ctx.font = "48px serif";
+      ctx.fillStyle = "#1a1a2e";
+      ctx.textAlign = "left";
+      ctx.fillText("𝄞", leftMargin - 10, sysY + staffHeight + 4);
+
+      // Draw notes
+      for (let i = noteStart; i < noteEnd; i++) {
+        const note = allNotes[i];
+        const x = leftMargin + (i - noteStart) * noteSpacing + noteSpacing / 2;
+
+        // Map MIDI to staff position
+        // Middle C (C4, midi 60) = 1 ledger line below treble staff
+        // Staff lines (bottom to top): E4=64, G4=67, B4=71, D5=74, F5=77
+        // Each staff position = half a lineGap
+        const staffBottom = sysY + staffHeight; // bottom line = E4 (midi 64)
+        const halfGap = lineGap / 2;
+
+        // Calculate position: each semitone maps to a diatonic position
+        // Use diatonic positions: C=0, D=1, E=2, F=3, G=4, A=5, B=6
+        const CHROMATIC_TO_DIATONIC = [0,0,1,1,2,3,3,4,4,5,5,6]; // C,C#,D,D#,E,F,F#,G,G#,A,A#,B
+        const noteIdx = note.midi % 12;
+        const octave = Math.floor(note.midi / 12) - 1;
+        const diatonic = CHROMATIC_TO_DIATONIC[noteIdx];
+        // E4 (bottom line) = octave 4, diatonic 2 → position 0
+        const e4Diatonic = 4 * 7 + 2; // absolute diatonic for E4
+        const noteDiatonic = octave * 7 + diatonic;
+        const posFromBottom = noteDiatonic - e4Diatonic; // 0 = E4 (bottom staff line)
+        const y = staffBottom - posFromBottom * halfGap;
+
+        // Determine if note needs sharp/flat indicator
+        const isSharp = [1,3,6,8,10].includes(noteIdx);
+
+        // Determine note value from duration
+        let noteType = "quarter"; // default
+        if (note.duration < 0.2) noteType = "sixteenth";
+        else if (note.duration < 0.35) noteType = "eighth";
+        else if (note.duration < 0.8) noteType = "quarter";
+        else if (note.duration < 1.5) noteType = "half";
+        else noteType = "whole";
+
+        // Ledger lines
+        ctx.strokeStyle = "#aaa";
+        ctx.lineWidth = 1;
+        if (y > staffBottom) {
+          // Below staff
+          for (let ly = staffBottom + lineGap; ly <= y + 1; ly += lineGap) {
+            ctx.beginPath();
+            ctx.moveTo(x - 12, ly);
+            ctx.lineTo(x + 12, ly);
+            ctx.stroke();
+          }
+        }
+        if (y < sysY) {
+          // Above staff
+          for (let ly = sysY - lineGap; ly >= y - 1; ly -= lineGap) {
+            ctx.beginPath();
+            ctx.moveTo(x - 12, ly);
+            ctx.lineTo(x + 12, ly);
+            ctx.stroke();
+          }
+        }
+
+        // Note head
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.fillStyle = "#1a1a2e";
+
+        if (noteType === "whole") {
+          // Hollow oval
+          ctx.beginPath();
+          ctx.ellipse(0, 0, 8, 5, 0, 0, Math.PI * 2);
+          ctx.lineWidth = 2;
+          ctx.strokeStyle = "#1a1a2e";
+          ctx.stroke();
+        } else if (noteType === "half") {
+          // Hollow oval with stem
+          ctx.beginPath();
+          ctx.ellipse(0, 0, 7, 5, -0.3, 0, Math.PI * 2);
+          ctx.lineWidth = 2;
+          ctx.strokeStyle = "#1a1a2e";
+          ctx.stroke();
+          // Stem
+          ctx.beginPath();
+          ctx.moveTo(7, 0);
+          ctx.lineTo(7, -32);
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+        } else {
+          // Filled oval
+          ctx.beginPath();
+          ctx.ellipse(0, 0, 7, 5, -0.3, 0, Math.PI * 2);
+          ctx.fill();
+          // Stem
+          ctx.beginPath();
+          const stemDir = y < sysY + staffHeight / 2 ? 1 : -1; // stem down if above middle
+          ctx.moveTo(stemDir > 0 ? -7 : 7, 0);
+          ctx.lineTo(stemDir > 0 ? -7 : 7, stemDir * 32);
+          ctx.lineWidth = 1.5;
+          ctx.strokeStyle = "#1a1a2e";
+          ctx.stroke();
+          // Flag for eighth/sixteenth
+          if (noteType === "eighth" || noteType === "sixteenth") {
+            const sx = stemDir > 0 ? -7 : 7;
+            const sy = stemDir * 32;
+            ctx.beginPath();
+            ctx.moveTo(sx, sy);
+            ctx.quadraticCurveTo(sx + 12, sy - stemDir * 8, sx + 8, sy - stemDir * 18);
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            if (noteType === "sixteenth") {
+              ctx.beginPath();
+              ctx.moveTo(sx, sy - stemDir * 6);
+              ctx.quadraticCurveTo(sx + 12, sy - stemDir * 14, sx + 8, sy - stemDir * 24);
+              ctx.stroke();
+            }
+          }
+        }
+        ctx.restore();
+
+        // Sharp symbol
+        if (isSharp) {
+          ctx.font = "14px serif";
+          ctx.fillStyle = "#1a1a2e";
+          ctx.textAlign = "right";
+          ctx.fillText("♯", x - 10, y + 5);
+        }
+
+        // Note name below each system (small)
+        ctx.font = "9px 'JetBrains Mono', monospace";
+        ctx.fillStyle = "#888";
+        ctx.textAlign = "center";
+        ctx.fillText(note.display, x, sysY + staffHeight + 28);
+
+        // Duration below name
+        ctx.font = "8px 'JetBrains Mono', monospace";
+        ctx.fillStyle = "#aaa";
+        ctx.fillText(note.duration.toFixed(2) + "s", x, sysY + staffHeight + 40);
+      }
+
+      // Bar line at start
+      ctx.strokeStyle = "#999";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(leftMargin - 10, sysY);
+      ctx.lineTo(leftMargin - 10, sysY + staffHeight);
+      ctx.stroke();
+
+      // End bar
+      const endX = leftMargin + (noteEnd - noteStart) * noteSpacing + 20;
+      ctx.beginPath();
+      ctx.moveTo(endX, sysY);
+      ctx.lineTo(endX, sysY + staffHeight);
+      ctx.stroke();
+    }
+  }
+
+  // === Download functions ===
+  function trDownloadPNG() {
+    const canvas = document.getElementById("trSheetCanvas");
+    if (!canvas) return;
+    const link = document.createElement("a");
+    link.download = "musiciain-transcription-" + Date.now() + ".png";
+    link.href = canvas.toDataURL("image/png");
+    link.click();
+  }
+
+  function trDownloadPDF() {
+    const canvas = document.getElementById("trSheetCanvas");
+    if (!canvas) return;
+    // Create a simple PDF using canvas image
+    const imgData = canvas.toDataURL("image/png");
+    const w = canvas.width;
+    const h = canvas.height;
+
+    // Build a minimal PDF
+    const pdfW = 595.28; // A4 width in points
+    const pdfH = 841.89; // A4 height in points
+    const scale = Math.min(pdfW / w, (pdfH - 80) / h);
+    const imgW = Math.round(w * scale);
+    const imgH = Math.round(h * scale);
+    const xOff = Math.round((pdfW - imgW) / 2);
+
+    // Use a simple approach: open in new window for printing
+    const printWin = window.open("", "_blank");
+    if (!printWin) { alert("Please allow popups to download PDF"); return; }
+    printWin.document.write(`<!DOCTYPE html><html><head><title>MusiciAIn Transcription</title>
+      <style>@page{size:landscape;margin:20mm}body{margin:0;display:flex;justify-content:center;align-items:flex-start;padding:20px}img{max-width:100%;height:auto}</style>
+      </head><body><img src="${imgData}" /><script>setTimeout(()=>{window.print();},500)<\/script></body></html>`);
+    printWin.document.close();
+  }
+
+  // === Microphone enumeration ===
+  async function trEnumerateMics() {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const mics = devices.filter(d => d.kind === "audioinput");
+      const select = document.getElementById("trMicSelect");
+      if (!select || mics.length === 0) return;
+      select.innerHTML = "";
+      mics.forEach((mic, i) => {
+        const opt = document.createElement("option");
+        opt.value = mic.deviceId;
+        opt.textContent = mic.label || ("Microphone " + (i + 1));
+        select.appendChild(opt);
+      });
+    } catch (e) { /* permission not yet granted — will populate after start */ }
+  }
+
+  // === Start / Stop ===
+  async function trStart() {
+    try {
+      const micSelect = document.getElementById("trMicSelect");
+      const constraints = { audio: micSelect && micSelect.value ? { deviceId: { exact: micSelect.value } } : true };
+      TR.stream = await navigator.mediaDevices.getUserMedia(constraints);
+
+      TR.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      TR.source = TR.audioCtx.createMediaStreamSource(TR.stream);
+      TR.analyser = TR.audioCtx.createAnalyser();
+      TR.analyser.fftSize = 4096;
+      TR.source.connect(TR.analyser);
+      TR.buffer = new Float32Array(TR.analyser.fftSize);
+
+      TR.running = true;
+      TR.startTs = Date.now();
+      TR.currentNote = null;
+      trPitchHistory.length = 0;
+
+      // Read settings
+      TR.sensitivity = parseInt(document.getElementById("trSensitivity").value) || 5;
+      TR.minDuration = parseFloat(document.getElementById("trMinDuration").value) || 0.12;
+      TR.transpose = parseInt(document.getElementById("trTranspose").value) || 0;
+
+      // UI state
+      document.getElementById("trStartBtn").disabled = true;
+      document.getElementById("trStopBtn").disabled = false;
+      document.getElementById("trLiveBar").classList.add("recording");
+
+      // Enumerate mics now that we have permission
+      trEnumerateMics();
+
+      trAnalyzeFrame();
+    } catch (err) {
+      alert("Microphone access denied. Please allow microphone permission and try again.");
+      console.error("Transcriber mic error:", err);
+    }
+  }
+
+  function trStop() {
+    TR.running = false;
+    if (TR.rafId) cancelAnimationFrame(TR.rafId);
+
+    // Save any in-progress note
+    if (TR.currentNote) {
+      const now = (Date.now() - TR.startTs) / 1000;
+      const dur = now - TR.currentStart;
+      if (dur >= TR.minDuration) {
+        TR.notes.push({ ...TR.currentNote, startTime: TR.currentStart, duration: dur });
+      }
+      TR.currentNote = null;
+    }
+
+    // Cleanup audio
+    if (TR.source) TR.source.disconnect();
+    if (TR.audioCtx) TR.audioCtx.close();
+    if (TR.stream) TR.stream.getTracks().forEach(t => t.stop());
+    TR.stream = null;
+
+    // UI state
+    document.getElementById("trStartBtn").disabled = false;
+    document.getElementById("trStopBtn").disabled = true;
+    document.getElementById("trLiveBar").classList.remove("recording");
+    document.getElementById("trNoteName").textContent = "—";
+    document.getElementById("trNoteName").classList.remove("active");
+    document.getElementById("trNoteFreq").textContent = "";
+
+    trUpdateUI();
+  }
+
+  function trClear() {
+    if (TR.running) trStop();
+    TR.notes = [];
+    trPitchHistory.length = 0;
+    trUpdateUI();
+
+    // Clear canvases
+    const pc = document.getElementById("trPitchCanvas");
+    if (pc) pc.getContext("2d").clearRect(0, 0, pc.width, pc.height);
+    const sc = document.getElementById("trSheetCanvas");
+    if (sc) { const sctx = sc.getContext("2d"); sctx.clearRect(0, 0, sc.width, sc.height); sctx.fillStyle = "#fefefe"; sctx.fillRect(0, 0, sc.width, sc.height); }
+
+    document.getElementById("trNoteCount").textContent = "0 notes";
+    document.getElementById("trNotesCount").textContent = "0 notes";
+    document.getElementById("trDuration").textContent = "0:00";
+    document.getElementById("trNotesList").innerHTML = "";
+  }
+
+  function initTranscriber() {
+    // Buttons
+    const startBtn = document.getElementById("trStartBtn");
+    const stopBtn = document.getElementById("trStopBtn");
+    const clearBtn = document.getElementById("trClearBtn");
+    const dlPng = document.getElementById("trDownloadPng");
+    const dlPdf = document.getElementById("trDownloadPdf");
+
+    if (startBtn) startBtn.addEventListener("click", trStart);
+    if (stopBtn) stopBtn.addEventListener("click", trStop);
+    if (clearBtn) clearBtn.addEventListener("click", trClear);
+    if (dlPng) dlPng.addEventListener("click", trDownloadPNG);
+    if (dlPdf) dlPdf.addEventListener("click", trDownloadPDF);
+
+    // Range sliders
+    const sens = document.getElementById("trSensitivity");
+    if (sens) sens.addEventListener("input", () => {
+      document.getElementById("trSensitivityVal").textContent = sens.value;
+      TR.sensitivity = parseInt(sens.value);
+    });
+
+    const minDur = document.getElementById("trMinDuration");
+    if (minDur) minDur.addEventListener("change", () => { TR.minDuration = parseFloat(minDur.value); });
+
+    const transpose = document.getElementById("trTranspose");
+    if (transpose) transpose.addEventListener("change", () => { TR.transpose = parseInt(transpose.value); });
+
+    // Enumerate mics
+    trEnumerateMics();
+  }
+
+  /* ================================================================
      INIT
      ================================================================ */
   function init() {
@@ -1995,6 +2651,7 @@
     initRagaExplorer();
     initBeatMaker();
     initFreePlay();
+    initTranscriber();
   }
 
   if (document.readyState === "loading") {
