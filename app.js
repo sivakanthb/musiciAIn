@@ -1911,7 +1911,7 @@
     let W, H, particles = [];
 
     const SYMBOLS = ["\u266A","\u266B","\u266C","\u2669","\u{1D11E}","\u{1D122}"];
-    const ORB_COLORS = ["139,92,246","236,72,153","6,182,212","245,158,11"];
+    const ORB_COLORS = ["139,92,246","232,121,168","34,211,238","96,165,250"];
 
     function resize() {
       W = canvas.width = window.innerWidth;
