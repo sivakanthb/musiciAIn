@@ -418,6 +418,9 @@ kbd{
 .footer-brand{font-size:1rem;font-weight:800;color:var(--text2)}
 .footer-tagline{font-size:0.78rem;color:var(--muted);font-style:italic}
 .footer-meta{display:flex;gap:8px;font-size:0.68rem;color:var(--muted);flex-wrap:wrap;justify-content:center}
+.footer-credit{font-size:0.72rem;color:var(--muted);margin-top:6px}
+.footer-credit a{color:var(--accent2);text-decoration:none;transition:color var(--ease)}
+.footer-credit a:hover{color:var(--accent);text-decoration:underline}
 
 /* ======================== RESPONSIVE ======================== */
 @media(max-width:768px){
