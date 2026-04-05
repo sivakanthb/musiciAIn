@@ -44,6 +44,10 @@
           Transcriber
         </a>
       </div>
+      <div class="nav-actions">
+        <button class="action-toggle" id="ambientToggle" title="Toggle ambient music" aria-label="Toggle ambient music">🎧</button>
+        <button class="action-toggle" id="themeToggle" title="Toggle light/dark mode" aria-label="Toggle theme">☀️</button>
+      </div>
       <button class="nav-toggle" id="navToggle" aria-label="Menu">
         <span></span><span></span><span></span>
       </button>
@@ -61,7 +65,7 @@
       <div class="hero-stats">
         <div class="stat"><strong>5</strong><span>Studio Modes</span></div>
         <div class="stat"><strong>72</strong><span>Ragas</span></div>
-        <div class="stat"><strong>12</strong><span>Moods</span></div>
+        <div class="stat"><strong>20</strong><span>Moods</span></div>
         <div class="stat"><strong>∞</strong><span>Compositions</span></div>
       </div>
     </div>
@@ -179,6 +183,46 @@
             <span class="mood-label">Nostalgia</span>
             <span class="mood-detail">Warm · Bittersweet · Memory</span>
           </button>
+          <button class="mood-card" data-mood="suspense">
+            <span class="mood-emoji">🔪</span>
+            <span class="mood-label">Suspense</span>
+            <span class="mood-detail">Thriller · Tense · Creeping</span>
+          </button>
+          <button class="mood-card" data-mood="horror">
+            <span class="mood-emoji">👻</span>
+            <span class="mood-label">Horror</span>
+            <span class="mood-detail">Chilling · Dissonant · Dread</span>
+          </button>
+          <button class="mood-card" data-mood="fury">
+            <span class="mood-emoji">🔥</span>
+            <span class="mood-label">Fury</span>
+            <span class="mood-detail">Aggressive · Intense · Raw</span>
+          </button>
+          <button class="mood-card" data-mood="ethereal">
+            <span class="mood-emoji">✨</span>
+            <span class="mood-label">Ethereal</span>
+            <span class="mood-detail">Dreamlike · Floating · Airy</span>
+          </button>
+          <button class="mood-card" data-mood="dramatic">
+            <span class="mood-emoji">🎭</span>
+            <span class="mood-label">Dramatic</span>
+            <span class="mood-detail">Climactic · Powerful · Intense</span>
+          </button>
+          <button class="mood-card" data-mood="groovy">
+            <span class="mood-emoji">🕺</span>
+            <span class="mood-label">Groovy</span>
+            <span class="mood-detail">Funky · Rhythmic · Soulful</span>
+          </button>
+          <button class="mood-card" data-mood="dark">
+            <span class="mood-emoji">🖤</span>
+            <span class="mood-label">Dark</span>
+            <span class="mood-detail">Brooding · Heavy · Ominous</span>
+          </button>
+          <button class="mood-card" data-mood="heroic">
+            <span class="mood-emoji">⚔️</span>
+            <span class="mood-label">Heroic</span>
+            <span class="mood-detail">Valiant · Soaring · Anthem</span>
+          </button>
         </div>
 
         <!-- Composition Controls -->
@@ -223,9 +267,11 @@
             <div class="control-group">
               <label>Duration</label>
               <select id="moodDuration">
-                <option value="8">8 bars</option>
-                <option value="16" selected>16 bars</option>
-                <option value="32">32 bars</option>
+                <option value="4">4 bars (~8s)</option>
+                <option value="8">8 bars (~16s)</option>
+                <option value="16" selected>16 bars (~32s)</option>
+                <option value="32">32 bars (~1m)</option>
+                <option value="64">64 bars (~2m)</option>
               </select>
             </div>
           </div>

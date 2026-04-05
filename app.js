@@ -128,6 +128,14 @@
     playful:    [[1,5,6,4], [1,4,5,4], [4,5,1,5], [1,6,4,5]],
     epic:       [[6,4,1,5], [1,5,6,4], [4,1,5,6], [6,5,4,1]],
     nostalgia:  [[1,6,4,5], [1,4,6,5], [4,1,5,6], [1,5,4,6]],
+    suspense:   [[1,7,6,7], [1,2,7,1], [6,7,1,2], [1,7,2,1]],
+    horror:     [[1,2,6,7], [6,7,1,2], [1,7,6,2], [7,6,2,1]],
+    fury:       [[1,5,6,4], [1,4,7,5], [6,5,1,7], [1,7,5,4]],
+    ethereal:   [[1,4,5,4], [1,5,4,1], [4,1,4,5], [1,4,1,4]],
+    dramatic:   [[6,5,4,1], [1,5,6,7], [6,7,1,5], [1,6,5,4]],
+    groovy:     [[1,4,5,4], [1,5,4,5], [4,5,1,4], [1,4,1,5]],
+    dark:       [[1,6,7,4], [6,4,7,1], [1,7,6,4], [7,6,4,1]],
+    heroic:     [[1,5,6,4], [4,5,1,5], [1,4,5,1], [1,5,4,1]],
   };
 
   // Song structures
@@ -462,6 +470,14 @@
     playful:    { scale:"mixolydian",tempo:132, octave:4, energy:0.75, swing:0.2, voicing:"open",   arpStyle:"updown",drumPattern:"pop",    instrument:"piano" },
     epic:       { scale:"harmonicMinor",tempo:96,octave:3,energy:0.85, swing:0,   voicing:"power",  arpStyle:"up",    drumPattern:"epic",   instrument:"strings" },
     nostalgia:  { scale:"pentatonic",tempo:86,  octave:4, energy:0.4,  swing:0.15,voicing:"spread", arpStyle:"down",  drumPattern:"ballad", instrument:"piano" },
+    suspense:   { scale:"phrygian",  tempo:72,  octave:3, energy:0.35, swing:0.1, voicing:"close",  arpStyle:"random",drumPattern:"tension",instrument:"pad" },
+    horror:     { scale:"harmonicMinor",tempo:66,octave:2,energy:0.45, swing:0,   voicing:"close",  arpStyle:"random",drumPattern:"tension",instrument:"pad" },
+    fury:       { scale:"phrygian",  tempo:160, octave:3, energy:1.0,  swing:0,   voicing:"power",  arpStyle:"random",drumPattern:"drive",  instrument:"synth" },
+    ethereal:   { scale:"lydian",    tempo:62,  octave:4, energy:0.15, swing:0.15,voicing:"spread", arpStyle:"up",    drumPattern:"none",   instrument:"pad" },
+    dramatic:   { scale:"harmonicMinor",tempo:100,octave:3,energy:0.75,swing:0,   voicing:"power",  arpStyle:"up",    drumPattern:"epic",   instrument:"strings" },
+    groovy:     { scale:"mixolydian",tempo:110, octave:3, energy:0.7,  swing:0.3, voicing:"open",   arpStyle:"updown",drumPattern:"pop",    instrument:"synth" },
+    dark:       { scale:"minor",     tempo:78,  octave:2, energy:0.4,  swing:0.1, voicing:"close",  arpStyle:"down",  drumPattern:"sparse", instrument:"pad" },
+    heroic:     { scale:"major",     tempo:130, octave:4, energy:0.9,  swing:0,   voicing:"power",  arpStyle:"up",    drumPattern:"epic",   instrument:"strings" },
   };
 
   // Drum patterns for composition
@@ -471,6 +487,7 @@
     drive:  { kick:[1,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0], snare:[0,0,0,0,1,0,0,1,0,0,0,0,1,0,0,0], hihat:[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1] },
     epic:   { kick:[1,0,0,1,0,0,1,0,0,0,1,0,0,0,0,0], snare:[0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0], tom:[0,0,1,0,0,1,0,0,0,0,0,1,0,0,1,0] },
     sparse: { kick:[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0], rim:[0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0], shaker:[0,0,0,0,1,0,0,0,0,0,0,0,1,0,0,0] },
+    tension:{ kick:[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0], rim:[0,0,0,0,0,0,1,0,0,0,0,0,0,0,1,0], shaker:[0,0,0,1,0,0,0,0,0,0,0,1,0,0,0,0] },
     none:   {},
   };
 
@@ -2642,6 +2659,84 @@
   /* ================================================================
      INIT
      ================================================================ */
+
+  /* ---------- Theme Toggle (Sonora-style) ---------- */
+  function initThemeToggle() {
+    const btn = document.getElementById("themeToggle");
+    if (!btn) return;
+    const saved = localStorage.getItem("musicain-theme");
+    if (saved === "light") {
+      document.documentElement.setAttribute("data-theme", "light");
+      btn.textContent = "🌙";
+    }
+    btn.addEventListener("click", () => {
+      const cur = document.documentElement.getAttribute("data-theme");
+      if (cur === "light") {
+        document.documentElement.removeAttribute("data-theme");
+        btn.textContent = "☀️";
+        localStorage.setItem("musicain-theme", "dark");
+      } else {
+        document.documentElement.setAttribute("data-theme", "light");
+        btn.textContent = "🌙";
+        localStorage.setItem("musicain-theme", "light");
+      }
+    });
+  }
+
+  /* ---------- Ambient Music Toggle ---------- */
+  function initAmbientToggle() {
+    const btn = document.getElementById("ambientToggle");
+    if (!btn || !ctx) return;
+    let playing = false;
+    let ambientNodes = [];
+    let ambientInterval = null;
+
+    function startAmbient() {
+      if (ctx.state === "suspended") ctx.resume();
+      // Gentle drone: soft pad chord (C-E-G-B, very quiet)
+      const freqs = [130.81, 164.81, 196.00, 246.94]; // C3 E3 G3 B3
+      freqs.forEach(f => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "sine";
+        osc.frequency.value = f;
+        gain.gain.setValueAtTime(0, ctx.currentTime);
+        gain.gain.linearRampToValueAtTime(0.02, ctx.currentTime + 2);
+        osc.connect(gain);
+        if (reverbNode) gain.connect(reverbNode);
+        else gain.connect(masterGain);
+        osc.start();
+        ambientNodes.push({ osc, gain });
+      });
+      // Gentle arpeggio every 3s
+      const ambientNotes = [261.63,329.63,392.00,493.88,523.25,392.00,329.63,261.63];
+      let idx = 0;
+      ambientInterval = setInterval(() => {
+        if (!playing) return;
+        const f = ambientNotes[idx % ambientNotes.length];
+        synthNote(f, 2.0, "pad", ctx.currentTime, 0.015, true);
+        idx++;
+      }, 3000);
+    }
+
+    function stopAmbient() {
+      const now = ctx.currentTime;
+      ambientNodes.forEach(({ osc, gain }) => {
+        gain.gain.linearRampToValueAtTime(0, now + 1.5);
+        osc.stop(now + 1.6);
+      });
+      ambientNodes = [];
+      if (ambientInterval) { clearInterval(ambientInterval); ambientInterval = null; }
+    }
+
+    btn.addEventListener("click", () => {
+      playing = !playing;
+      btn.classList.toggle("active", playing);
+      if (playing) startAmbient();
+      else stopAmbient();
+    });
+  }
+
   function init() {
     initAmbientCanvas();
     initNav();
@@ -2652,6 +2747,8 @@
     initBeatMaker();
     initFreePlay();
     initTranscriber();
+    initThemeToggle();
+    initAmbientToggle();
   }
 
   if (document.readyState === "loading") {
